@@ -68,6 +68,38 @@ test('exam context and material search with fixture LEARN/Drive data', async (t)
   }));
 
   const originalFetch = globalThis.fetch;
+  const { closeBrowser, getContext, setSessionContextFactoryForTests } = await import('../dist/session.js');
+  setSessionContextFactoryForTests(async () => ({
+    route: async () => {},
+    close: async () => {},
+    newPage: async () => ({
+      goto: async () => {},
+      url: () => process.env.LEARN_BASE_URL,
+      locator: () => ({
+        allTextContents: async () => ['CS 135 - Fall 2026'],
+        count: async () => 1,
+        first: () => ({ innerText: async () => 'CS 135 - Fall 2026' }),
+      }),
+      close: async () => {},
+    }),
+    request: {
+      get: async (url, options = {}) => {
+        const response = await originalFetch(url, {
+          redirect: options.maxRedirects === 0 ? 'manual' : 'follow',
+          headers: options.headers,
+        });
+        return {
+          status: () => response.status,
+          ok: () => response.ok,
+          headers: () => Object.fromEntries(response.headers.entries()),
+          text: () => response.text(),
+          json: () => response.json(),
+          body: async () => Buffer.from(await response.arrayBuffer()),
+          dispose: async () => {},
+        };
+      },
+    },
+  }));
   globalThis.fetch = async (url) => {
     assert.equal(new URL(url).hostname, 'www.googleapis.com');
     if (new URL(url).searchParams.get('alt') === 'media') {
@@ -77,7 +109,6 @@ test('exam context and material search with fixture LEARN/Drive data', async (t)
       id: 'past-exam', name: 'CS 135 Final Exam.pdf', mimeType: 'application/pdf',
     }] }), { headers: { 'Content-Type': 'application/json' } });
   };
-  const { closeBrowser, getContext } = await import('../dist/session.js');
   try {
     const context = await getContext();
     await context.route('**/*', (route) => route.abort());
@@ -153,6 +184,7 @@ test('exam context and material search with fixture LEARN/Drive data', async (t)
   } finally {
     globalThis.fetch = originalFetch;
     await closeBrowser();
+    setSessionContextFactoryForTests(null);
     await new Promise((resolve) => server.close(resolve));
     await fs.rm(dir, { recursive: true, force: true });
   }

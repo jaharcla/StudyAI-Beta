@@ -5,13 +5,15 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { cacheDirectory, diffCourses, fingerprintCourse, readCache, writeCache } from "./cache.mjs";
 import { isReauthError, McpConnector } from "./mcp-client.mjs";
-import { generateQuestions, normalizePages, DEFAULT_MODEL } from "./practice.mjs";
+import { availableGroqModels, generateQuestions, normalizePages, DEFAULT_MODEL } from "./practice.mjs";
 import { createMcpHandler } from "./mcp-gateway.mjs";
 import { buildCourseOverview } from "./course-intelligence.mjs";
+import { createLearnAuthController, learnAuthFile } from "./learn-auth.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const port = Number(process.env.STUDYAI_API_PORT || 4174);
 const connector = new McpConnector(root);
+const learnAuth = createLearnAuthController({ authFile: learnAuthFile() });
 let cache = await readCache();
 let status = { state: "not-configured", updatedAt: new Date().toISOString(), lastSuccessAt: cache.lastSuccessAt };
 let syncChain = Promise.resolve();
@@ -26,6 +28,10 @@ async function localModels() {
   } catch {
     return { available: false, models: [], preferred: DEFAULT_MODEL, message: "Ollama is unavailable on this computer. Start Ollama to generate real questions." };
   }
+}
+async function availableModels() {
+  if (process.env.STUDYAI_LLM_PROVIDER !== "groq") return localModels();
+  return availableGroqModels(process.env.GROQ_API_KEY);
 }
 
 const execFileAsync = promisify(execFile);
@@ -176,8 +182,14 @@ const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", "http://127.0.0.1");
   const path = url.pathname;
   if (path === "/mcp") return handleMcp(request, response);
-  if (request.method === "GET" && path === "/api/health") return json(response, { ...status, localModel: DEFAULT_MODEL });
-  if (request.method === "GET" && path === "/api/models") return json(response, await localModels());
+  if (request.method === "GET" && path === "/api/health") return json(response, { ...status, localModel: DEFAULT_MODEL, modelProvider: process.env.STUDYAI_LLM_PROVIDER === "groq" ? "groq" : "ollama" });
+  if (request.method === "GET" && path === "/api/learn/status") return json(response, await learnAuth.getStatus(status.state));
+  if (request.method === "POST" && ["/api/learn/connect", "/api/learn/reconnect"].includes(path)) {
+    try { return json(response, await learnAuth.start(), 202); }
+    catch (error) { return json(response, { error: error instanceof Error ? error.message : "LEARN sign-in could not start." }, 503); }
+  }
+  if (request.method === "POST" && path === "/api/learn/cancel") return json(response, await learnAuth.stop(status.state));
+  if (request.method === "GET" && path === "/api/models") return json(response, await availableModels());
   if (request.method === "GET" && path === "/api/health/libreoffice") return json(response, await checkLibreOffice());
   if (request.method === "GET" && path === "/api/courses") return json(response, { courses: cache.courses.map(publicCourse), status });
   if (request.method === "POST" && path === "/api/courses/sync") {
@@ -235,16 +247,20 @@ const server = http.createServer(async (request, response) => {
         throw Object.assign(new Error("Invalid local model name."), { statusCode: 400 });
       }
       const model = requestedModel || DEFAULT_MODEL;
-      const installed = await localModels();
+      const provider = process.env.STUDYAI_LLM_PROVIDER === "groq" ? "groq" : "ollama";
+      const installed = await availableModels();
       if (!installed.available) throw Object.assign(new Error(installed.message), { statusCode: 503 });
-      if (!installed.models.includes(model)) throw Object.assign(new Error("Model " + model + " is not installed in local Ollama. Choose an available model."), { statusCode: 400 });
+      if (!installed.models.includes(model)) throw Object.assign(new Error(provider === "groq" ? "Choose an available Groq model." : "Model " + model + " is not installed in local Ollama. Choose an available model."), { statusCode: 400 });
       const cancelled = new AbortController();
       const onDisconnect = () => { if (!response.writableEnded) cancelled.abort(); };
       response.once("close", onDisconnect);
       try {
         const material = await fetchMaterial(String(id), topicId);
         if (cancelled.signal.aborted) return;
-        const generated = await generateQuestions(material.pages, courseId + ":" + topicId, { model, signal: cancelled.signal });
+        const generated = await generateQuestions(material.pages, courseId + ":" + topicId, {
+          model, signal: cancelled.signal, provider,
+          ...(provider === "groq" ? { apiKey: process.env.GROQ_API_KEY } : {}),
+        });
         if (!cancelled.signal.aborted) return json(response, { ...generated, courseId, topicId, materialTitle: material.title, source: material.source });
       } finally {
         response.off("close", onDisconnect);
@@ -256,7 +272,7 @@ const server = http.createServer(async (request, response) => {
 });
 server.on("error", (error) => { console.error("[StudyAI] API startup failed:", error.message); process.exitCode = 1; });
 server.listen(port, "127.0.0.1", () => console.error("StudyAI API listening on 127.0.0.1:" + port));
-async function shutdown() { await connector.close(); server.close(() => process.exit(0)); }
+async function shutdown() { await learnAuth.stop(); await connector.close(); server.close(() => process.exit(0)); }
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 export { normalizedCourse, parseCourses, setStatus, doSync, cacheDirectory };

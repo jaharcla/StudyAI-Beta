@@ -5,8 +5,8 @@ import { getConnectorStatus, getCourses, syncCourses } from "./domain/connector"
 import { LocalStorageProgress } from "./domain/persistence";
 import { readLastSession, saveLastSession } from "./domain/session";
 import { DEMO_MATERIAL, evaluateAnswer, identifyObjectives, makeQuestion, rankRecommendations, updateMastery } from "./domain/study";
-import { flattenTopics, generatePractice, getLocalModels, loadCourseModules, loadLecture } from "./domain/live";
-import type { LearnModule, LearnTopic, LectureMaterial, ModelStatus, PracticeResponse } from "./domain/live";
+import { cancelLearnLogin, flattenTopics, generatePractice, getLearnAuthStatus, getLocalModels, isReadableTopic, learnOriginalUrl, loadCourseModules, loadLecture, startLearnLogin, topicExtension } from "./domain/live";
+import type { LearnAuthStatus, LearnModule, LearnTopic, LectureMaterial, ModelStatus, PracticeResponse } from "./domain/live";
 import type { ConnectorSyncStatus, CourseSummary, MasteryState, MultipleChoiceQuestion } from "./domain/contracts";
 
 type Encounter = Phaser.Scene & { resolve?: (correct: boolean, totalQuestions?: number) => void; reset?: () => void };
@@ -15,15 +15,18 @@ type Loading = "courses" | "modules" | "lecture" | "questions" | null;
 type Filter = "all" | "slides" | "pdf" | "docs";
 const demoObjectives = identifyObjectives(DEMO_MATERIAL);
 const initialStatus: ConnectorSyncStatus = { state: "checking", updatedAt: new Date().toISOString(), lastSuccessAt: null };
-function kind(name: string): Filter {
-  if (/\.(ppt|pptx)$/i.test(name)) return "slides";
-  if (/\.pdf$/i.test(name)) return "pdf";
-  if (/\.(doc|docx)$/i.test(name)) return "docs";
+const codespacesMode = import.meta.env.VITE_STUDYAI_CODESPACES === "true";
+function kind(topic: LearnTopic): Filter {
+  const ext = topicExtension(topic);
+  if (["ppt", "pptx"].includes(ext)) return "slides";
+  if (ext === "pdf") return "pdf";
+  if (["doc", "docx"].includes(ext)) return "docs";
   return "all";
 }
-function fileLabel(name: string) {
-  const type = kind(name);
-  return type === "slides" ? "SLIDES" : type === "pdf" ? "PDF" : type === "docs" ? "DOC" : "FILE";
+function fileLabel(topic: LearnTopic) {
+  const ext = topicExtension(topic);
+  const type = kind(topic);
+  return type === "slides" ? "SLIDES" : type === "pdf" ? "PDF" : type === "docs" ? "DOC" : ext === "html" ? "PAGE" : ["mp4", "webm"].includes(ext) ? "VIDEO" : topic.type.toLowerCase() === "link" || ext === "d2l" ? "LINK" : "FILE";
 }
 function timeLabel(seconds: number) {
   return seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "m " + String(seconds % 60).padStart(2, "0") + "s";
@@ -35,13 +38,17 @@ export default function App() {
   const generator = useRef<AbortController | null>(null);
   const requestId = useRef(0);
   const submitting = useRef(false);
+  const authSyncStarted = useRef(false);
+  const loginViewer = useRef<Window | null>(null);
   const progress = useMemo(() => new LocalStorageProgress(), []);
   const [restored] = useState(readLastSession);
   const [status, setStatus] = useState<ConnectorSyncStatus>(initialStatus);
+  const [learnAuth, setLearnAuth] = useState<LearnAuthStatus | null>(null);
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [courseId, setCourseId] = useState(restored?.courseId ?? "");
   const [modules, setModules] = useState<LearnModule[]>([]);
   const [topic, setTopic] = useState<LearnTopic | null>(restored?.topic ?? null);
+  const [unsupportedTopic, setUnsupportedTopic] = useState<LearnTopic | null>(null);
   const [material, setMaterial] = useState<LectureMaterial | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -68,7 +75,7 @@ export default function App() {
 
   const topics = useMemo(() => flattenTopics(modules), [modules]);
   const matches = useMemo(() => topics.filter(t =>
-    (filter === "all" || kind(t.title) === filter) &&
+    (filter === "all" || kind(t) === filter) &&
     (t.title + " " + t.moduleTitle).toLowerCase().includes(search.trim().toLowerCase())
   ), [topics, filter, search]);
   const visibleTopics = showMore ? matches : matches.slice(0, 35);
@@ -114,7 +121,7 @@ export default function App() {
       setModels(result);
       setModel(previous => previous && result.models.includes(previous) ? previous : result.preferred);
     } catch {
-      setModels({ available: false, models: [], preferred: "", message: "Could not contact the local-model service." });
+      setModels({ available: false, models: [], preferred: "", provider: codespacesMode ? "groq" : "ollama", message: codespacesMode ? "Could not check Groq from the Codespace." : "Could not contact the local-model service." });
     } finally { setCheckingModel(false); }
   }, []);
 
@@ -139,6 +146,29 @@ export default function App() {
     void refreshModels();
     return () => { alive = false; generator.current?.abort(); };
   }, [refreshModels, restored]);
+
+  useEffect(() => {
+    if (!codespacesMode) return;
+    let alive = true;
+    const check = async () => {
+      const current = await getLearnAuthStatus().catch(() => null);
+      if (!alive || !current) return;
+      setLearnAuth(current);
+      if (current.state === "session-saved" && !authSyncStarted.current) {
+        authSyncStarted.current = true;
+        loginViewer.current?.close();
+        loginViewer.current = null;
+        await sync();
+        const verified = await getLearnAuthStatus().catch(() => null);
+        if (alive && verified) setLearnAuth(verified);
+      } else if (["login-required", "reauth-required", "offline"].includes(current.state)) {
+        authSyncStarted.current = false;
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 2500);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     saveLastSession({ questions, source, courseId, topic, modelInfo, index, outcomes, choice, feedback, done });
@@ -184,6 +214,36 @@ export default function App() {
     } catch (e) { setError((e as Error).message); }
     finally { setLoading(null); }
   }
+  async function connectLearn() {
+    const viewer = window.open("about:blank", "_blank");
+    if (!viewer) {
+      setError("Allow pop-ups for this private Codespaces app, then choose Connect LEARN again.");
+      return;
+    }
+    viewer.document.title = "StudyAI LEARN sign-in";
+    viewer.document.body.textContent = "Starting the private LEARN sign-in window…";
+    viewer.opener = null;
+    loginViewer.current = viewer;
+    authSyncStarted.current = false;
+    setError("");
+    try {
+      const reconnect = learnAuth?.state === "reauth-required" || learnAuth?.state === "offline";
+      const current = await startLearnLogin(reconnect);
+      setLearnAuth(current);
+      if (current.viewerUrl) viewer.location.replace(current.viewerUrl);
+      else { viewer.close(); loginViewer.current = null; }
+    } catch (e) {
+      viewer.close();
+      loginViewer.current = null;
+      setError((e as Error).message);
+    }
+  }
+  async function cancelConnectLearn() {
+    loginViewer.current?.close();
+    loginViewer.current = null;
+    const current = await cancelLearnLogin().catch(() => null);
+    if (current) setLearnAuth(current);
+  }
   async function chooseCourse(id: string) {
     const seq = ++requestId.current;
     generator.current?.abort();
@@ -202,8 +262,14 @@ export default function App() {
   }
   async function chooseTopic(item: LearnTopic) {
     if (!courseId) return;
+    if (!isReadableTopic(item)) {
+      setUnsupportedTopic(item);
+      setError("This LEARN topic is not a supported document type. Your current study session is preserved.");
+      return;
+    }
     const seq = ++requestId.current;
     generator.current?.abort();
+    setUnsupportedTopic(null);
     setTopic(item); setMaterial(null); clearQuestions();
     setPreviewOpen(false); setError(""); setLoading("lecture");
     try {
@@ -246,7 +312,7 @@ export default function App() {
     submitting.current = true;
     const answer = { questionId: active.id, choiceId: choice, submittedAt: new Date().toISOString() };
     const result = evaluateAnswer(active, answer);
-    const next = updateMastery(mastery[active.objectiveId] ?? null, result);
+    const next = await updateMastery(mastery[active.objectiveId] ?? null, result);
     try {
       await progress.saveAnswer(answer, result, next);
     } catch (e) {
@@ -283,26 +349,27 @@ export default function App() {
   });
 
   const canGenerate = Boolean(material?.pages.some(p => p.text.trim())) && !busy && models?.available === true && Boolean(model);
-  const connectionLabel = status.state === "connected" ? "LEARN connected" : status.state === "reauth-required" ? "Sign-in needed" : "LEARN " + status.state;
-  const modelLabel = checkingModel ? "Checking Ollama" : models?.available ? "Local AI ready" : "Local AI offline";
+  const liveConnectionState = codespacesMode ? learnAuth?.state || "checking" : status.state;
+  const connectionLabel = liveConnectionState === "connected" ? "LEARN connected" : liveConnectionState === "session-saved" ? "Verifying LEARN session" : liveConnectionState === "reauth-required" || liveConnectionState === "login-required" ? "LEARN sign-in needed" : liveConnectionState === "connecting" ? "LEARN sign-in in progress" : liveConnectionState === "offline" ? "LEARN unavailable" : "LEARN " + liveConnectionState;
+  const modelLabel = checkingModel ? (codespacesMode ? "Checking Groq" : "Checking Ollama") : models?.available ? (codespacesMode ? "Groq ready" : "Local AI ready") : (codespacesMode ? "Groq unavailable" : "Local AI offline");
 
   return (
     <main className="experience">
       <header className="experience-header">
         <div className="brand-line"><span className="brand-mark" aria-hidden="true">S✦</span><div><strong>STUDY<span>AI</span></strong><small>YOUR LEARNING WORKSPACE</small></div></div>
-        <div className="header-status"><span className={"connection-chip " + status.state}><i/>{connectionLabel}</span><span className={"connection-chip " + (models?.available ? "connected" : "offline")}><i/>{modelLabel}</span></div>
+        <div className="header-status"><span className={"connection-chip " + (liveConnectionState === "session-saved" ? "checking" : liveConnectionState)}><i/>{connectionLabel}</span><span className={"connection-chip " + (models?.available ? "connected" : "offline")}><i/>{modelLabel}</span></div>
       </header>
       <section className="hero">
         <div><p className="eyebrow">STUDY SMARTER · REMEMBER LONGER</p><h1>From lecture to <em>level up.</em></h1><p>Choose a real lesson, turn it into a challenge, and see what you know.</p></div>
         <div className="hero-stats"><div><b>{courses.filter(c => c.dataSource.kind === "waterloo-mcp").length}</b><span>courses</span></div><div><b>{topics.length}</b><span>materials</span></div></div>
       </section>
       <div className="journey" aria-label="Study workflow"><span className={courseId ? "complete" : "current"}><b>01</b> Course</span><i/><span className={material ? "complete" : topic ? "current" : ""}><b>02</b> Lecture</span><i/><span className={questions.length ? "current" : ""}><b>03</b> Challenge</span></div>
-      {error && <div className="experience-alert" role="alert"><span>{error}</span><button aria-label="Dismiss alert" onClick={() => setError("")}>×</button></div>}
+      {error && <div className="experience-alert" role="alert"><span>{error}{learnOriginalUrl(unsupportedTopic?.url ?? topic?.url) && <> <a href={learnOriginalUrl(unsupportedTopic?.url ?? topic?.url) as string} target="_blank" rel="noreferrer">Open original in LEARN</a></>}</span><button aria-label="Dismiss alert" onClick={() => {setError("");setUnsupportedTopic(null);}}>×</button></div>}
       <div className="experience-layout">
         <aside className="library" aria-label="Course library">
           <div className="library-title"><div><small>YOUR LIBRARY</small><h2>Find a lesson</h2></div><span aria-hidden="true">⌕</span></div>
           <div className="library-body">
-            <div className="sync-line"><div><strong>Waterloo LEARN</strong><small>{status.state === "connected" ? "Course index available" : status.message || connectionLabel}</small></div><button disabled={busy} onClick={() => void sync()}>{loading === "courses" ? "Syncing…" : "↻ Sync"}</button></div>
+            <div className="sync-line"><div><strong>Waterloo LEARN</strong><small>{codespacesMode ? learnAuth?.message || connectionLabel : status.state === "connected" ? "Course index available" : status.message || connectionLabel}</small></div>{codespacesMode && <button disabled={busy || liveConnectionState === "connecting"} onClick={() => void connectLearn()}>{liveConnectionState === "login-required" ? "Connect LEARN" : "Reconnect"}</button>}{liveConnectionState === "connecting" && codespacesMode && <button onClick={() => void cancelConnectLearn()}>Cancel</button>}<button disabled={busy} onClick={() => void sync()}>{loading === "courses" ? "Syncing…" : "↻ Sync"}</button></div>
             <label htmlFor="course-picker">Course</label>
             <select id="course-picker" disabled={busy} value={courseId} onChange={e => void chooseCourse(e.target.value)}>
               <option value="">Select a course</option>
@@ -319,7 +386,7 @@ export default function App() {
               </div>
               {loading === "modules" ? <div className="library-skeleton">Loading modules and materials…</div> :
                 <div className="material-list">
-                  {topicGroups.map(group => <div className="material-group" key={group.title}><div className="group-label">{group.title}</div>{group.items.map(item => <button key={item.id} className={"material-item " + (item.id === topic?.id ? "active" : "")} disabled={busy} onClick={() => void chooseTopic(item)}><span className="file-type">{fileLabel(item.title)}</span><span className="material-name">{item.title}</span></button>)}</div>)}
+                  {topicGroups.map(group => <div className="material-group" key={group.title}><div className="group-label">{group.title}</div>{group.items.map(item => <button key={item.id} className={"material-item " + (item.id === topic?.id ? "active" : "")} disabled={busy} onClick={() => void chooseTopic(item)}><span className="file-type">{fileLabel(item)}</span><span className="material-name">{item.title}</span></button>)}</div>)}
                   {!matches.length && <div className="library-empty">No matching materials. Try another search or file type.</div>}
                   {!showMore && matches.length > visibleTopics.length && <button className="show-more" onClick={() => setShowMore(true)}>Show all {matches.length} materials</button>}
                 </div>}
@@ -340,9 +407,9 @@ export default function App() {
               {previewOpen && <div className="material-preview">{material.pages.map(p => <p key={p.page}><b>Page {p.page}</b>{p.text || "No readable text extracted on this page."}</p>)}</div>}
               <p className="source-note">{material.note}</p>
               <div className="generation-controls">
-                <div className="model-picker"><label htmlFor="model-picker">Local AI model</label><select id="model-picker" value={model} onChange={e => setModel(e.target.value)} disabled={busy || checkingModel}>{models?.models.length ? models.models.map(name => <option key={name} value={name}>{name}</option>) : <option value="">No installed models detected</option>}</select><button onClick={() => void refreshModels()} disabled={busy || checkingModel} title="Refresh Ollama models" aria-label="Refresh local models">↻</button></div>
-                {!models?.available && !checkingModel && <p className="model-warning">{models?.message || "Ollama isn't connected."} You can still try the demo.</p>}
-                {loading === "questions" ? <div className="generation-busy" role="status"><span className="spin"/><div><strong>Creating your challenge</strong><p>Local AI is working. {timeLabel(elapsed)} elapsed; an exact completion estimate is unavailable.</p></div><button onClick={cancelGeneration}>Cancel</button></div> :
+                <div className="model-picker"><label htmlFor="model-picker">{codespacesMode ? "Groq model" : "Local AI model"}</label><select id="model-picker" value={model} onChange={e => setModel(e.target.value)} disabled={busy || checkingModel}>{models?.models.length ? models.models.map(name => <option key={name} value={name}>{name}</option>) : <option value="">{codespacesMode ? "Groq model unavailable" : "No installed models detected"}</option>}</select><button onClick={() => void refreshModels()} disabled={busy || checkingModel} title={codespacesMode ? "Refresh Groq models" : "Refresh Ollama models"} aria-label={codespacesMode ? "Refresh Groq models" : "Refresh local models"}>↻</button></div>
+                {!models?.available && !checkingModel && <p className="model-warning">{models?.message || (codespacesMode ? "Groq isn't available." : "Ollama isn't connected.")} You can still try the demo.</p>}
+                {loading === "questions" ? <div className="generation-busy" role="status"><span className="spin"/><div><strong>Creating your challenge</strong><p>{codespacesMode ? "Groq is working in Codespaces." : "Local AI is working."} {timeLabel(elapsed)} elapsed; an exact completion estimate is unavailable.</p></div><button onClick={cancelGeneration}>Cancel</button></div> :
                   <button className="cta" disabled={!canGenerate} onClick={() => void generate()}>✦ Generate practice challenge <span aria-hidden="true">→</span></button>}
               </div>
             </> : <div className="source-empty"><span aria-hidden="true">✦</span><p>{topic ? "Your previously selected lecture is available to reopen." : "Select a lesson in your library to create a study challenge."}</p>{topic && courseId && !busy && <button className="reopen-lecture" onClick={() => void chooseTopic(topic)}>Reopen lecture →</button>}</div>}
@@ -367,7 +434,7 @@ export default function App() {
           </article> : <article className="empty-encounter"><div className="empty-illustration" aria-hidden="true">✦</div><span className="eyebrow">YOUR NEXT CHALLENGE</span><h2>Knowledge is your power-up.</h2><p>Generate questions from your selected lecture to start an encounter—or play the demo.</p><button onClick={demo}>Try the demo →</button></article>}
         </section>
       </div>
-      <footer className="experience-footer"><span>STUDYAI BETA · LOCAL-FIRST</span><details><summary>Privacy &amp; accuracy</summary><p>Lecture text is sent only to your local Ollama service when you choose to generate questions. Course material is never intentionally sent to a cloud model by StudyAI. AI-generated explanations may be inaccurate; check the lecture citation before high-stakes use.</p></details></footer>
+      <footer className="experience-footer"><span>{codespacesMode ? "STUDYAI BETA · CODESPACES" : "STUDYAI BETA · LOCAL-FIRST"}</span><details><summary>Privacy &amp; accuracy</summary><p>{codespacesMode ? "When you choose to generate questions, selected lecture text is sent from this Codespace to Groq using your Codespaces secret. WatIAM passwords and LEARN cookies stay in the private Codespaces session store and are never sent to Groq." : "Lecture text is sent only to your local Ollama service when you choose to generate questions. Course material is never intentionally sent to a cloud model by StudyAI."} AI-generated explanations may be inaccurate; check the lecture citation before high-stakes use.</p></details></footer>
     </main>
   );
 }

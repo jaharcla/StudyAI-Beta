@@ -1,0 +1,23 @@
+{
+  "name": "StudyAI Codespaces",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-24-bookworm",
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "StudyAI",
+      "visibility": "private",
+      "onAutoForward": "openPreview"
+    },
+    "6080": {
+      "label": "Temporary LEARN sign-in",
+      "visibility": "private",
+      "onAutoForward": "silent"
+    }
+  },
+  "containerEnv": {
+    "STUDYAI_LLM_PROVIDER": "groq",
+    "VITE_STUDYAI_CODESPACES": "true"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "remoteUser": "vscode"
+}

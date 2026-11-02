@@ -7,22 +7,36 @@ export class AuthError extends Error {}
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let authMtimeMs = 0;
+let authSignature = '';
+let testContextFactory: (() => Promise<BrowserContext>) | null = null;
+
+export function setSessionContextFactoryForTests(factory: (() => Promise<BrowserContext>) | null): void {
+  testContextFactory = factory;
+}
 
 export async function getContext(): Promise<BrowserContext> {
   if (!fs.existsSync(AUTH_FILE)) {
     throw new AuthError(LOGIN_HELP);
   }
-  const currentAuthMtimeMs = fs.statSync(AUTH_FILE).mtimeMs;
-  if (context && currentAuthMtimeMs !== authMtimeMs) {
+  const authStat = fs.statSync(AUTH_FILE);
+  const currentAuthMtimeMs = authStat.mtimeMs;
+  const currentAuthSignature = process.env.CODESPACES === 'true'
+    ? `${authStat.mtimeMs}:${authStat.size}:${authStat.ino}`
+    : String(authStat.mtimeMs);
+  const previousAuthSignature = process.env.CODESPACES === 'true' ? authSignature : String(authMtimeMs);
+  if (context && currentAuthSignature !== previousAuthSignature) {
     await context.close().catch(() => {});
     context = null;
   }
-  if (!browser) {
-    browser = await chromium.launch({ headless: true });
-  }
   if (!context) {
-    context = await browser.newContext({ storageState: AUTH_FILE });
+    if (testContextFactory) {
+      context = await testContextFactory();
+    } else {
+      if (!browser) browser = await chromium.launch({ headless: true });
+      context = await browser.newContext({ storageState: AUTH_FILE });
+    }
     authMtimeMs = currentAuthMtimeMs;
+    authSignature = currentAuthSignature;
   }
   return context;
 }
@@ -38,6 +52,7 @@ export async function closeBrowser(): Promise<void> {
   context = null;
   browser = null;
   authMtimeMs = 0;
+  authSignature = '';
 }
 
 /**

@@ -1,6 +1,31 @@
 import { createHash } from "node:crypto";
 
-export const DEFAULT_MODEL = process.env.STUDYAI_OLLAMA_MODEL || "qwen3:8b";
+export const GROQ_DEFAULT_MODEL = process.env.STUDYAI_GROQ_MODEL || "openai/gpt-oss-20b";
+export const DEFAULT_MODEL = process.env.STUDYAI_LLM_PROVIDER === "groq"
+  ? GROQ_DEFAULT_MODEL
+  : process.env.STUDYAI_OLLAMA_MODEL || "qwen3:8b";
+
+export async function availableGroqModels(apiKey, opts = {}) {
+  const preferred = opts.model || GROQ_DEFAULT_MODEL;
+  if (!apiKey) return { available: false, models: [], preferred, provider: "groq", message: "Add GROQ_API_KEY as a Codespaces secret to enable Groq inference." };
+  try {
+    const request = opts.fetch || fetch;
+    const response = await request("https://api.groq.com/openai/v1/models", {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) return { available: false, models: [], preferred, provider: "groq", message: "Groq credentials or model access could not be verified." };
+    const payload = await response.json();
+    const models = Array.isArray(payload.data)
+      ? payload.data.filter(item => item?.active !== false && item?.id === preferred).map(item => item.id)
+      : [];
+    return models.length
+      ? { available: true, models, preferred, provider: "groq" }
+      : { available: false, models: [], preferred, provider: "groq", message: "The configured Groq model is unavailable on this account." };
+  } catch {
+    return { available: false, models: [], preferred, provider: "groq", message: "Groq could not be reached from the Codespace." };
+  }
+}
 
 export function normalizePages(pages) {
   if (!Array.isArray(pages)) return [];
@@ -62,7 +87,8 @@ export async function generateQuestions(pages, sourceId, opts = {}) {
   if (!normalized.length) throw new Error("This document has no readable page text. Choose another lecture.");
   const excerpts = normalized.map(({ page, text }) => "[PAGE " + page + "] " + text.slice(0, 1650)).join("\n\n").slice(0, 9500);
   if (excerpts.length < 100) throw new Error("The selected material contains too little readable text to generate reliable questions.");
-  const model = opts.model || DEFAULT_MODEL;
+  const provider = opts.provider === "groq" ? "groq" : "ollama";
+  const model = opts.model || (provider === "groq" ? GROQ_DEFAULT_MODEL : DEFAULT_MODEL);
   const prompt = [
     "Using ONLY the attached lecture text, return a JSON object with a 'questions' array containing exactly 3 multiple-choice questions.",
     "Each question must be academically meaningful and assess understanding, reasoning, or application. Never ask which statement merely repeats a learning objective.",
@@ -75,33 +101,61 @@ export async function generateQuestions(pages, sourceId, opts = {}) {
   ].join("\n\n");
   let response;
   try {
-    response = await fetch("http://127.0.0.1:11434/api/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        format: "json",
-        stream: false,
-        think: false,
-        options: { temperature: 0.25, num_predict: 1400, num_ctx: 6144 },
-        keep_alive: "2m",
-      }),
-      signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(150000)]) : AbortSignal.timeout(150000),
-    });
+    const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(150000)]) : AbortSignal.timeout(150000);
+    const request = opts.fetch || fetch;
+    if (provider === "groq") {
+      if (!opts.apiKey) throw new Error("Add GROQ_API_KEY to Codespaces secrets before generating course questions.");
+      response = await request("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          response_format: { type: "json_object" },
+          reasoning_effort: "low",
+          reasoning_format: "hidden",
+          temperature: 0.25,
+          max_completion_tokens: 1800,
+          stream: false,
+        }),
+        signal,
+      });
+    } else {
+      response = await request("http://127.0.0.1:11434/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          format: "json",
+          stream: false,
+          think: false,
+          options: { temperature: 0.25, num_predict: 1400, num_ctx: 6144 },
+          keep_alive: "2m",
+        }),
+        signal,
+      });
+    }
   } catch (error) {
     if (opts.signal?.aborted) throw new Error("Question generation was cancelled.");
-    if (error?.name === "TimeoutError") throw new Error("Local Ollama generation timed out. Try a smaller model or document.");
+    if (error?.message?.includes("GROQ_API_KEY")) throw error;
+    if (error?.name === "TimeoutError") throw new Error(provider === "groq" ? "Groq generation timed out. Try again shortly." : "Local Ollama generation timed out. Try a smaller model or document.");
+    if (provider === "groq") throw new Error("Could not reach Groq from the Codespace.");
     throw new Error("Cannot reach local Ollama at 127.0.0.1:11434. Start Ollama and confirm the model is installed.");
   }
   if (!response.ok) {
+    if (provider === "groq") {
+      if (response.status === 429) throw new Error("Groq free-tier rate limit reached. Wait briefly and retry.");
+      if (response.status === 401 || response.status === 403) throw new Error("Groq rejected the Codespaces API key or model access.");
+      throw new Error("Groq request failed (HTTP " + response.status + ").");
+    }
     const body = await response.text().catch(() => "");
     throw new Error("Ollama returned " + response.status + ": " + body.slice(0, 250));
   }
   const payload = await response.json();
   return {
     model,
-    questions: validateGenerated(payload?.message?.content, normalized, sourceId),
+    questions: validateGenerated(provider === "groq" ? payload?.choices?.[0]?.message?.content : payload?.message?.content, normalized, sourceId),
     validation: "Quotes matched source pages; factual accuracy still requires student review.",
   };
 }

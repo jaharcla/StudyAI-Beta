@@ -3,45 +3,70 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createServer } from 'node:http';
 
-test('saved session reload and rejected-session errors', async (t) => {
+function mockedResponse(status) {
+  return {
+    status: () => status,
+    ok: () => status >= 200 && status < 300,
+    headers: () => ({ 'content-type': status === 302 ? 'text/html' : 'application/json', 'content-disposition': '' }),
+    text: async () => 'Session rejected',
+    json: async () => ({ Items: [] }),
+    body: async () => Buffer.from('file'),
+  };
+}
+
+test('saved session reload and rejected-session errors', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'learn-mcp-session-'));
   const authFile = path.join(dir, 'auth.json');
-  await fs.writeFile(authFile, JSON.stringify({ cookies: [], origins: [] }));
+  await fs.writeFile(authFile, JSON.stringify({ cookies: [], origins: [], marker: 'initial' }));
+  const previousAuthFile = process.env.LEARN_AUTH_FILE;
+  const previousBaseUrl = process.env.LEARN_BASE_URL;
   process.env.LEARN_AUTH_FILE = authFile;
-  const server = createServer((req, res) => {
-    const status = Number(req.url.slice(1));
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Session rejected' }));
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  process.env.LEARN_BASE_URL = `http://127.0.0.1:${server.address().port}`;
+  const previousCodespaces = process.env.CODESPACES;
+  process.env.CODESPACES = 'true';
+  process.env.LEARN_BASE_URL = 'https://learn.mock.invalid';
 
-  const { AuthError, apiGet, apiGetBinary, closeBrowser, getContext } = await import('../dist/session.js');
+  const { AuthError, apiGet, apiGetBinary, closeBrowser, getContext, setSessionContextFactoryForTests } = await import('../dist/session.js');
+  const contexts = [];
+  setSessionContextFactoryForTests(async () => {
+    const ctx = {
+      close: async () => {},
+      request: { get: async (url) => mockedResponse(Number(new URL(url).pathname.slice(1))) },
+    };
+    contexts.push(ctx);
+    return ctx;
+  });
   try {
-    await t.test('getContext reloads auth.json after npm run login replaces it', async () => {
-      const first = await getContext();
-      const changed = new Date(Date.now() + 2_000);
-      await fs.utimes(authFile, changed, changed);
-      const second = await getContext();
-      assert.notEqual(second, first);
-    });
-    await t.test('JSON and file requests explain how to recover from 401/403', async () => {
-      for (const status of [401, 403]) {
-        for (const get of [apiGet, apiGetBinary]) {
-          await assert.rejects(get(`/${status}`), (error) => {
-            assert.ok(error instanceof AuthError);
-            assert.match(error.message, new RegExp(`saved session \\(${status}`));
-            assert.match(error.message, /npm run login/);
-            return true;
-          });
-        }
+    const first = await getContext();
+    const changed = new Date(Date.now() + 2_000);
+    await fs.utimes(authFile, changed, changed);
+    const second = await getContext();
+    assert.notEqual(second, first);
+    const sameTime = new Date(Date.now() + 4_000);
+    await fs.writeFile(authFile, JSON.stringify({ cookies: [], origins: [], marker: 'replaced with different length' }));
+    await fs.utimes(authFile, sameTime, sameTime);
+    const third = await getContext();
+    assert.notEqual(third, second);
+
+    for (const status of [302, 401, 403]) {
+      for (const get of [apiGet, apiGetBinary]) {
+        await assert.rejects(get(`/${status}`), (error) => {
+          assert.ok(error instanceof AuthError);
+          assert.match(error.message, status === 302 ? /Session expired.*StudyAI Connect LEARN/ : new RegExp(`saved session \\(${status}`));
+          if (status !== 302) assert.match(error.message, /StudyAI Connect LEARN/);
+          return true;
+        });
       }
-    });
+    }
   } finally {
     await closeBrowser();
-    await new Promise((resolve) => server.close(resolve));
+    setSessionContextFactoryForTests(null);
     await fs.rm(dir, { recursive: true, force: true });
+    if (previousCodespaces === undefined) delete process.env.CODESPACES;
+    else process.env.CODESPACES = previousCodespaces;
+    if (previousAuthFile === undefined) delete process.env.LEARN_AUTH_FILE;
+    else process.env.LEARN_AUTH_FILE = previousAuthFile;
+    if (previousBaseUrl === undefined) delete process.env.LEARN_BASE_URL;
+    else process.env.LEARN_BASE_URL = previousBaseUrl;
   }
 });

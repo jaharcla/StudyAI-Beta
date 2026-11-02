@@ -88,6 +88,7 @@ export interface MasteryState {
   correctCount: number;
   lastAttemptAt: IsoTimestamp | null;
   nextReviewAt: IsoTimestamp | null;
+  fsrsCard?: Record<string, unknown>;
 }
 
 export interface StudyRecommendation {

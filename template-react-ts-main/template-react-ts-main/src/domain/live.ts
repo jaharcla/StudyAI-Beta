@@ -5,6 +5,7 @@ export interface LearnTopic {
   title: string;
   type: string;
   moduleTitle: string;
+  url: string | null;
 }
 
 export interface LearnModule {
@@ -38,11 +39,31 @@ export interface ModelStatus {
   available: boolean;
   models: string[];
   preferred: string;
+  provider?: "ollama" | "groq";
   message?: string;
 }
 
 export async function getLocalModels(): Promise<ModelStatus> {
   return getJson<ModelStatus>("/api/models");
+}
+
+export interface LearnAuthStatus {
+  enabled: boolean;
+  state: "connected" | "session-saved" | "login-required" | "reauth-required" | "offline" | "connecting";
+  viewerUrl: string | null;
+  message?: string;
+}
+
+export async function getLearnAuthStatus(): Promise<LearnAuthStatus> {
+  return getJson<LearnAuthStatus>("/api/learn/status");
+}
+
+export async function startLearnLogin(reconnect = false): Promise<LearnAuthStatus> {
+  return getJson<LearnAuthStatus>(reconnect ? "/api/learn/reconnect" : "/api/learn/connect", { method: "POST" });
+}
+
+export async function cancelLearnLogin(): Promise<LearnAuthStatus> {
+  return getJson<LearnAuthStatus>("/api/learn/cancel", { method: "POST" });
 }
 
 export interface PracticeResponse {
@@ -61,13 +82,33 @@ export function flattenTopics(modules: LearnModule[]): LearnTopic[] {
     for (const mod of items) {
       const names = [...ancestors, mod.title];
       for (const topic of mod.topics ?? []) {
-        result.push({ id: topic.id, title: topic.title, type: topic.type, moduleTitle: names.join(" / ") });
+        result.push({ id: topic.id, title: topic.title, type: topic.type, url: topic.url, moduleTitle: names.join(" / ") });
       }
       walk(mod.modules ?? [], names);
     }
   };
   walk(modules, []);
   return result;
+}
+
+export function topicExtension(topic: Pick<LearnTopic, "title" | "url">): string {
+  const source = topic.url || topic.title;
+  try {
+    const path = new URL(source, "https://learn.uwaterloo.ca").pathname;
+    return path.split("/").pop()?.split(".").pop()?.toLowerCase() || "";
+  } catch { return ""; }
+}
+
+export function isReadableTopic(topic: LearnTopic): boolean {
+  return ["pdf", "ppt", "pptx", "doc", "docx"].includes(topicExtension(topic));
+}
+
+export function learnOriginalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === "learn.uwaterloo.ca" ? parsed.toString() : null;
+  } catch { return null; }
 }
 
 async function getJson<T>(url: string, options?: RequestInit): Promise<T> {

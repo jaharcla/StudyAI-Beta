@@ -23,6 +23,7 @@ export const GOOGLE_DRIVE_FOLDER_IDS = (
   .map((id) => id.trim())
   .filter(Boolean);
 
-export const LOGIN_HELP =
-  `No valid LEARN session. Run \`npm run login\` in ${PROJECT_ROOT} to open a browser, ` +
-  `sign in with your WatIAM credentials, approve the Duo push, and save a fresh session to auth.json.`;
+export const LOGIN_HELP = process.env.CODESPACES === 'true'
+  ? 'No valid LEARN session. Use StudyAI Connect LEARN or Reconnect to sign in and approve Duo.'
+  : `No valid LEARN session. Run \`npm run login\` in ${PROJECT_ROOT} to open a browser, ` +
+    `sign in with your WatIAM credentials, approve the Duo push, and save a fresh session to auth.json.`;

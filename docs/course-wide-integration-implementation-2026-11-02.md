@@ -1,7 +1,7 @@
 # StudyAI-Beta course-wide integration — implementation handoff (2026-11-02)
 
 ## Scope / status
-This is real source code added to the user's existing Windows workspace through the live Filesystem MCP. **It has NOT been compiled, tested, or exercised against live LEARN in the current session.** The assistant has no direct shell on the user's Windows PC.
+This integration is implemented in the existing Windows workspace. It was compiled, tested, and exercised against authenticated LEARN on 2026-11-02. Current verification results appear below; earlier notes in this handoff describe the original implementation history.
 
 ## Emergency repair performed
 Eight project source files had unresolved Git merge-conflict markers (HEAD vs origin/main):
@@ -32,21 +32,20 @@ The assistant resolved each in favor of the newer HEAD implementation (UX redesi
 7. public/style.css: styles for the source-aware dashboard.
 8. server/course-intelligence.test.mjs: pure unit tests for partial source failures, deadline integrity, no fabricated dates, caching, quick-vs-full source loading.
 
-## Required Windows verification
-From app root C:\Users\Owner\Downloads\StudyAI-Beta\template-react-ts-main\template-react-ts-main:
-  git status
-  npm test
-  npx tsc --noEmit
-  npm run build-nolog
-  npm run dev-study
-
-Open http://localhost:5173 (restart Node backend after edits). Choose KIN 120. The course dashboard should retrieve quick overview (two sources); click Load full profile for five sources. Trigger Prepare exam study context and cross-file search on demand. Verify source warnings, expired LEARN session behavior, pagination, source URLs and dates. The full profile can be slow; timeouts in the external MCP must be investigated, not treated as no assignments.
+## Windows verification completed
+- `npm test`: 32/32 backend and frontend tests passed.
+- `npx tsc --noEmit`: passed.
+- `npm run build-nolog`: passed.
+- `npm run dev-study`: app ran at `http://localhost:5173` with API on `127.0.0.1:4174`.
+- Browser: real LEARN sync and topic tree, full 5/5-source course profile, exam context, cross-file search, 49-page source extraction, local `qwen3:8b` question generation, correct answer feedback, FSRS persistence, reload restoration, typed HTML fallback, and desktop/mobile viewport overflow checks passed.
+- Search indexed 10 files, returned 4 cited passages, and reported 2 failed files without failing the whole search.
+- The initial search hit the MCP SDK 60-second default. The client now sets a bounded 240-second timeout for this operation; a retry completed successfully.
 
 ## Dependencies NOT installed / tasks still pending
-- ts-fsrs spaced repetition library: not installed and not wired into the persistence algorithm. Check Node version and library compatibility, add dependency locally, run tests.
+- `ts-fsrs` v6 / FSRS-7 is installed and connected to browser-local answer persistence; Node 24.13.0 satisfies its runtime requirement.
 - MathLive, JSXGraph, Numbas, H5P: not yet installed. Require typed activity adapter / grading contracts and non-LLM answer validation.
 - Achieve (Macmillan): no direct authenticated read API has been demonstrated. Official LMS linking and grade sync are not permission to scrape publisher content.
-- StudyAI is not yet a course-wide objective graph, spaced-repetition planner, or validated educational game engine. The new dashboard and existing MCP search are foundations for those milestones.
+- The current practice activity is multiple-choice combat. MathLive/JSXGraph equation and graphing activities, a full objective graph, and scientifically validated AI grading remain future work.
 
 ## Important care points
 - Do not overwrite the resolved UX branch with origin/main.

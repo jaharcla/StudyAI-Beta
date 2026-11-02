@@ -8,9 +8,14 @@ function entryPath(root) {
   const fallback = resolve(root, "../../waterloo_learn_mcp-main/waterloo_learn_mcp-main/dist/index.js");
   return configured ? (isAbsolute(configured) ? configured : resolve(root, configured)) : fallback;
 }
-function safeEnvironment() {
+function safeEnvironment(root) {
   const names = ["PATH", "PATHEXT", "SystemRoot", "SYSTEMROOT", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"];
-  return Object.fromEntries(names.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
+  const env = Object.fromEntries(names.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
+  if (process.env.CODESPACES === "true") {
+    env.CODESPACES = "true";
+    env.LEARN_AUTH_FILE = process.env.LEARN_AUTH_FILE || resolve(root, "../../.studyai-private/learn-auth-state.json");
+  }
+  return env;
 }
 function extractError(result) {
   return Array.isArray(result?.content)
@@ -47,7 +52,7 @@ export class McpConnector {
         command: process.execPath,
         args: [entry],
         cwd: dirname(entry),
-        env: safeEnvironment(),
+        env: safeEnvironment(this.root),
         stderr: "ignore",
       });
       const client = new Client({ name: "studyai-local-bridge", version: "1.0.0" });
@@ -65,16 +70,11 @@ export class McpConnector {
   }
   async call(name, args = {}, timeoutMs = 0) {
     const client = await this.ensureConnected();
-    const promise = client.callTool({ name, arguments: args });
-    if (!timeoutMs || timeoutMs <= 0) {
-      const result = await promise;
-      if (result?.isError) throw new Error(extractError(result));
-      return result;
-    }
-    const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`MCP call "${name}" timed out after ${timeoutMs} ms`)), timeoutMs),
+    const result = await client.callTool(
+      { name, arguments: args },
+      undefined,
+      { timeout: timeoutMs > 0 ? timeoutMs : 60000, resetTimeoutOnProgress: true, maxTotalTimeout: timeoutMs > 0 ? timeoutMs : 60000 },
     );
-    const result = await Promise.race([promise, timeout]);
     if (result?.isError) throw new Error(extractError(result));
     return result;
   }
@@ -101,7 +101,7 @@ export class McpConnector {
   }
   async searchCourseMaterials(courseId, query, maxFiles = 12, maxResults = 12) {
     return structuredResult(await this.call("search_course_materials",
-      { course: courseId, query, maxFiles, maxResults }), "search");
+      { course: courseId, query, maxFiles, maxResults }, 240000), "search");
   }
   async getTopicFile(courseId, topicId, pages = "1-8") {
     const response = await this.call("get_topic_file", { courseId, topicId, pages }, 240000);
