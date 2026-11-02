@@ -4,7 +4,10 @@ import { resolve } from "node:path";
 import { cacheDirectory, diffCourses, fingerprintCourse, readCache, writeCache } from "./cache.mjs";
 import { isReauthError, McpConnector } from "./mcp-client.mjs";
 import { generateQuestions, normalizePages, DEFAULT_MODEL } from "./practice.mjs";
+<<<<<<< HEAD
 import { createMcpHandler } from "./mcp-gateway.mjs";
+=======
+>>>>>>> origin/main
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const port = Number(process.env.STUDYAI_API_PORT || 4174);
@@ -13,6 +16,7 @@ let cache = await readCache();
 let status = { state: "not-configured", updatedAt: new Date().toISOString(), lastSuccessAt: cache.lastSuccessAt };
 let syncChain = Promise.resolve();
 const materialCache = new Map();
+<<<<<<< HEAD
 async function localModels() {
   try {
     const response = await fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(2500) });
@@ -24,6 +28,8 @@ async function localModels() {
     return { available: false, models: [], preferred: DEFAULT_MODEL, message: "Ollama is unavailable on this computer. Start Ollama to generate real questions." };
   }
 }
+=======
+>>>>>>> origin/main
 
 function setStatus(state, message, lastSuccessAt = status.lastSuccessAt) {
   status = { state, updatedAt: new Date().toISOString(), lastSuccessAt, ...(message ? { message } : {}) };
@@ -126,6 +132,7 @@ async function fetchMaterial(courseId, topicId) {
   return material;
 }
 
+<<<<<<< HEAD
 const handleMcp = createMcpHandler({
   listCourses: () => ({ courses: cache.courses.map(publicCourse), status }),
   getModules: async (courseId) => connector.getContent(requireCourse(courseId)),
@@ -137,6 +144,12 @@ const server = http.createServer(async (request, response) => {
   if (path === "/mcp") return handleMcp(request, response);
   if (request.method === "GET" && path === "/api/health") return json(response, { ...status, localModel: DEFAULT_MODEL });
   if (request.method === "GET" && path === "/api/models") return json(response, await localModels());
+=======
+const server = http.createServer(async (request, response) => {
+  const url = new URL(request.url || "/", "http://127.0.0.1");
+  const path = url.pathname;
+  if (request.method === "GET" && path === "/api/health") return json(response, { ...status, localModel: DEFAULT_MODEL });
+>>>>>>> origin/main
   if (request.method === "GET" && path === "/api/courses") return json(response, { courses: cache.courses.map(publicCourse), status });
   if (request.method === "POST" && path === "/api/courses/sync") {
     try { return json(response, await sync()); }
@@ -162,6 +175,7 @@ const server = http.createServer(async (request, response) => {
       const courseId = String(body?.courseId ?? "");
       const id = requireCourse(courseId);
       const topicId = requireTopic(body?.topicId);
+<<<<<<< HEAD
       const requestedModel = typeof body.model === "string" ? body.model : undefined;
       if (requestedModel && (requestedModel.length > 100 || /[^a-zA-Z0-9._:\/-]/.test(requestedModel))) {
         throw Object.assign(new Error("Invalid local model name."), { statusCode: 400 });
@@ -182,6 +196,11 @@ const server = http.createServer(async (request, response) => {
         response.off("close", onDisconnect);
       }
       return;
+=======
+      const material = await fetchMaterial(String(id), topicId);
+      const generated = await generateQuestions(material.pages, courseId + ":" + topicId);
+      return json(response, { ...generated, courseId, topicId, materialTitle: material.title, source: material.source });
+>>>>>>> origin/main
     } catch (error) { return errorResponse(response, error); }
   }
   return json(response, { error: "Not found" }, 404);
