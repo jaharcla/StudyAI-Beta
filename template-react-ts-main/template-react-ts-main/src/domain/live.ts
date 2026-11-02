@@ -30,7 +30,6 @@ export interface LiveQuestion extends MultipleChoiceQuestion {
   sourceQuote: string;
 }
 
-<<<<<<< HEAD
 export interface ModelStatus {
   available: boolean;
   models: string[];
@@ -42,8 +41,6 @@ export async function getLocalModels(): Promise<ModelStatus> {
   return getJson<ModelStatus>("/api/models");
 }
 
-=======
->>>>>>> origin/main
 export interface PracticeResponse {
   courseId: string;
   topicId: string;
@@ -94,20 +91,12 @@ export async function loadLecture(courseId: string, topicId: string): Promise<Le
   return result;
 }
 
-<<<<<<< HEAD
 export async function generatePractice(courseId: string, topicId: string, model?: string, signal?: AbortSignal): Promise<PracticeResponse> {
   const result = await getJson<PracticeResponse>("/api/practice/generate", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ courseId, topicId, model }),
     signal,
-=======
-export async function generatePractice(courseId: string, topicId: string): Promise<PracticeResponse> {
-  const result = await getJson<PracticeResponse>("/api/practice/generate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ courseId, topicId }),
->>>>>>> origin/main
   });
   if (!Array.isArray(result.questions) || result.questions.length === 0) throw new Error("The model generated no usable questions.");
   return result;
