@@ -30,6 +30,10 @@ try {
         $found = Get-Command tunnel-client.exe, tunnel-client -ErrorAction SilentlyContinue |
             Select-Object -First 1
         if ($found) { $TunnelClientPath = $found.Source }
+        if (-not $TunnelClientPath) {
+            $knownPath = Join-Path $env:USERPROFILE 'Downloads\tunnel-client-v0.0.16-windows-amd64\tunnel-client.exe'
+            if (Test-Path -LiteralPath $knownPath -PathType Leaf) { $TunnelClientPath = $knownPath }
+        }
     }
     if (-not $TunnelClientPath -or -not (Test-Path -LiteralPath $TunnelClientPath -PathType Leaf)) {
         Write-Host 'Tunnel client was not found on PATH.' -ForegroundColor Yellow
