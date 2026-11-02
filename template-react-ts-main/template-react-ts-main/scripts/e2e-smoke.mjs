@@ -12,7 +12,7 @@ import { mkdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
 
-const frontend = "http://127.0.0.1:5173";
+const frontend = "http://localhost:5173";
 const backend = "http://127.0.0.1:4174";
 const server = spawn(process.execPath, ["scripts/dev.mjs"], {
   cwd: process.cwd(),
