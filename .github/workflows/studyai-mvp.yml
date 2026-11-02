@@ -42,3 +42,16 @@ jobs:
         run: npx tsc --noEmit
       - name: Production build
         run: npm run build-nolog
+      - name: Install headless Chromium for browser smoke test
+        run: |
+          npm install --no-save --package-lock=false playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Test desktop and mobile demo end to end
+        run: node scripts/e2e-smoke.mjs
+      - name: Upload browser failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studyai-browser-screenshots
+          path: template-react-ts-main/template-react-ts-main/test-results/*.png
+          if-no-files-found: ignore
