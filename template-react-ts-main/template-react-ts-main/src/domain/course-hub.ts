@@ -4,8 +4,8 @@ export type Overview = Awaited<ReturnType<typeof _loadCourseOverview>>;
 export type ExamResult = Awaited<ReturnType<typeof _loadExamContext>>;
 export type SearchResult = Awaited<ReturnType<typeof _searchCourseMaterials>>;
 
-export async function getCourseOverview(courseId: string, refresh = false, _full = false): Promise<Overview> {
-  return _loadCourseOverview(courseId, refresh);
+export async function getCourseOverview(courseId: string, refresh = false, full = false): Promise<Overview> {
+  return _loadCourseOverview(courseId, refresh, full);
 }
 
 export async function getCourseExamContext(courseId: string): Promise<ExamResult> {

@@ -147,9 +147,12 @@ export interface CourseSearchResult {
   source: string;
 }
 
-export async function loadCourseOverview(courseId: string, refresh = false): Promise<CourseOverview> {
-  const url = "/api/courses/" + encodeURIComponent(courseId) + "/overview" + (refresh ? "?refresh=1" : "");
-  return getJson<CourseOverview>(url);
+export async function loadCourseOverview(courseId: string, refresh = false, full = false): Promise<CourseOverview> {
+  const params = new URLSearchParams();
+  if (refresh) params.set("refresh", "1");
+  if (full) params.set("full", "1");
+  const suffix = params.toString() ? "?" + params.toString() : "";
+  return getJson<CourseOverview>("/api/courses/" + encodeURIComponent(courseId) + "/overview" + suffix);
 }
 
 export async function loadExamContext(courseId: string, assessment = "final exam"): Promise<ExamContextResult> {

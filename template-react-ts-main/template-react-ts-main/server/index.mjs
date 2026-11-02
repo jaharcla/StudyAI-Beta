@@ -143,19 +143,24 @@ async function fetchMaterial(courseId, topicId) {
     throw error;
   }
   const pages = normalizePages(result.pages);
-  const hasEmptyPages = result.emptyPages.length > 0;
+  const emptyPages = Array.isArray(result.emptyPages) ? result.emptyPages : [];
+  const totalPages = Number.isInteger(result.totalPages) ? result.totalPages : pages.length;
+  const fetchedPageCount = Number.isInteger(result.fetchedPageCount) ? result.fetchedPageCount : pages.length;
+  const readablePageCount = pages.length;
+  const incomplete = emptyPages.length > 0 || readablePageCount < totalPages;
   const material = {
     courseId,
     topicId,
     title: result.filename || "Lecture",
-    totalPages: result.totalPages,
+    totalPages,
     pages,
     source: "Waterloo LEARN via local MCP",
     note: result.note || undefined,
-    fetchedPageCount: result.fetchedPageCount,
-    emptyPages: result.emptyPages,
-    coverage: result.totalPages > 0 ? Math.round(result.fetchedPageCount / result.totalPages * 100) : 0,
-    status: hasEmptyPages ? "partial" : "ready",
+    fetchedPageCount,
+    emptyPages,
+    // "coverage" measures usable text, not simply downloaded slides.
+    coverage: totalPages > 0 ? Math.round(readablePageCount / totalPages * 100) : 0,
+    status: incomplete ? "partial" : "ready",
   };
   if (materialCache.size >= 8) materialCache.delete(materialCache.keys().next().value);
   materialCache.set(key, { material, cachedAt: Date.now() });
