@@ -87,16 +87,10 @@ export async function generateQuestions(pages, sourceId, opts = {}) {
         options: { temperature: 0.25, num_predict: 1400, num_ctx: 6144 },
         keep_alive: "2m",
       }),
-<<<<<<< HEAD
       signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(150000)]) : AbortSignal.timeout(150000),
     });
   } catch (error) {
     if (opts.signal?.aborted) throw new Error("Question generation was cancelled.");
-=======
-      signal: AbortSignal.timeout(150000),
-    });
-  } catch (error) {
->>>>>>> origin/main
     if (error?.name === "TimeoutError") throw new Error("Local Ollama generation timed out. Try a smaller model or document.");
     throw new Error("Cannot reach local Ollama at 127.0.0.1:11434. Start Ollama and confirm the model is installed.");
   }

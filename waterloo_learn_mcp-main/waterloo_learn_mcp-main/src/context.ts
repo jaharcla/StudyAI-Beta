@@ -48,10 +48,7 @@ export interface StudyMaterial {
   title: string;
   type: string;
   url: string | null;
-<<<<<<< HEAD
   kind: string;
-=======
->>>>>>> origin/main
   modulePath: string[];
   score: number;
 }
@@ -143,7 +140,6 @@ function relevantEvents(items: UpcomingEvent[], assessment: string): UpcomingEve
   return items.filter((item) => relevance(`${item.title} ${item.description ?? ''}`, assessment) > 0);
 }
 
-<<<<<<< HEAD
 export function classifyTopicKind(topic: { url: string | null; type: string }): string {
   const type = topic.type.toLowerCase();
   let extension = '';
@@ -167,8 +163,7 @@ export function classifyTopicKind(topic: { url: string | null; type: string }): 
   if (/external|link|url|quicklink/i.test(type)) return 'external';
   return 'unknown';
 }
-=======
->>>>>>> origin/main
+
 export function flattenMaterials(modules: Modules, assessment: string): StudyMaterial[] {
   const output: StudyMaterial[] = [];
   const visit = (items: Modules, parents: string[]) => {
@@ -188,10 +183,7 @@ export function flattenMaterials(modules: Modules, assessment: string): StudyMat
           title: topic.title,
           type: topic.type,
           url: topic.url,
-<<<<<<< HEAD
           kind: classifyTopicKind(topic),
-=======
->>>>>>> origin/main
           modulePath,
           score,
         });

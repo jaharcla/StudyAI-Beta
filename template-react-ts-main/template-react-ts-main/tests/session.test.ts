@@ -26,11 +26,8 @@ test("restores the last locally saved study question set", () => {
     saveLastSession(session);
     assert.deepEqual(readLastSession(), session);
     saveLastSession({ ...session, questions: [] });
-<<<<<<< HEAD
     assert.equal(readLastSession()?.courseId, "12345");
     saveLastSession({ ...session, courseId: "", questions: [] });
-=======
->>>>>>> origin/main
     assert.equal(readLastSession(), null);
   } finally {
     if (before) Object.defineProperty(globalThis, "localStorage", before);

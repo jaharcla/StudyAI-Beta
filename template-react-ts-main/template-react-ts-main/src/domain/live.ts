@@ -22,6 +22,10 @@ export interface LectureMaterial {
   source: string;
   note?: string;
   pages: Array<{ page: number; text: string }>;
+  status?: "ready" | "partial" | "unsupported" | "open-original" | "reauth-required" | "retryable-error";
+  fetchedPageCount?: number;
+  emptyPages?: number[];
+  coverage?: number;
 }
 
 export interface LiveQuestion extends MultipleChoiceQuestion {
@@ -30,7 +34,6 @@ export interface LiveQuestion extends MultipleChoiceQuestion {
   sourceQuote: string;
 }
 
-<<<<<<< HEAD
 export interface ModelStatus {
   available: boolean;
   models: string[];
@@ -42,8 +45,6 @@ export async function getLocalModels(): Promise<ModelStatus> {
   return getJson<ModelStatus>("/api/models");
 }
 
-=======
->>>>>>> origin/main
 export interface PracticeResponse {
   courseId: string;
   topicId: string;
@@ -94,20 +95,88 @@ export async function loadLecture(courseId: string, topicId: string): Promise<Le
   return result;
 }
 
-<<<<<<< HEAD
+export interface CourseOverviewSource {
+  state: "available" | "unavailable" | "not-checked";
+  count: number | null;
+  items: any[];
+  title?: string;
+  url?: string | null;
+  excerpt?: string;
+}
+
+export interface CourseOverviewWarning {
+  source: string;
+  message: string;
+}
+
+export interface CourseOverview {
+  courseId: string;
+  checkedAt: string;
+  sources: Record<string, CourseOverviewSource>;
+  due: Array<{ title: string; dueAt: string; origin: string; description: string }>;
+  warnings: CourseOverviewWarning[];
+  complete: boolean;
+  provenance: string;
+  cached?: boolean;
+}
+
+export interface ExamContextShape {
+  studyMaterials?: any[];
+  warnings?: any[];
+  assessment?: string;
+  [key: string]: any;
+}
+
+export interface ExamContextResult {
+  courseId: string;
+  context: ExamContextShape;
+  source: string;
+}
+
+export interface CourseSearchShape {
+  results?: any[];
+  indexedFiles?: number;
+  failedFiles?: number;
+  [key: string]: any;
+}
+
+export interface CourseSearchResult {
+  courseId: string;
+  query: string;
+  search: CourseSearchShape;
+  source: string;
+}
+
+export async function loadCourseOverview(courseId: string, refresh = false): Promise<CourseOverview> {
+  const url = "/api/courses/" + encodeURIComponent(courseId) + "/overview" + (refresh ? "?refresh=1" : "");
+  return getJson<CourseOverview>(url);
+}
+
+export async function loadExamContext(courseId: string, assessment = "final exam"): Promise<ExamContextResult> {
+  const url = "/api/courses/" + encodeURIComponent(courseId) + "/exam-context?assessment=" + encodeURIComponent(assessment);
+  return getJson<ExamContextResult>(url);
+}
+
+export async function searchCourseMaterials(courseId: string, query: string): Promise<CourseSearchResult> {
+  const url = "/api/courses/" + encodeURIComponent(courseId) + "/search?q=" + encodeURIComponent(query);
+  return getJson<CourseSearchResult>(url);
+}
+
+export interface LibreOfficeHealth {
+  available: boolean;
+  binary: string | null;
+}
+
+export async function checkLibreOfficeHealth(): Promise<LibreOfficeHealth> {
+  return getJson<LibreOfficeHealth>("/api/health/libreoffice");
+}
+
 export async function generatePractice(courseId: string, topicId: string, model?: string, signal?: AbortSignal): Promise<PracticeResponse> {
   const result = await getJson<PracticeResponse>("/api/practice/generate", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ courseId, topicId, model }),
     signal,
-=======
-export async function generatePractice(courseId: string, topicId: string): Promise<PracticeResponse> {
-  const result = await getJson<PracticeResponse>("/api/practice/generate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ courseId, topicId }),
->>>>>>> origin/main
   });
   if (!Array.isArray(result.questions) || result.questions.length === 0) throw new Error("The model generated no usable questions.");
   return result;

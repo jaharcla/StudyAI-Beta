@@ -13,14 +13,11 @@ export interface SavedSession {
   courseId: string;
   topic: LearnTopic | null;
   modelInfo: PracticeResponse | null;
-<<<<<<< HEAD
   index?: number;
   outcomes?: boolean[];
   feedback?: "correct" | "incorrect" | null;
   choice?: string | null;
   done?: boolean;
-=======
->>>>>>> origin/main
 }
 
 const KEY = "studyai-beta:v0.1:last-session";
@@ -42,11 +39,7 @@ export function readLastSession(): SavedSession | null {
 
 export function saveLastSession(session: SavedSession): void {
   try {
-<<<<<<< HEAD
     if (!session.questions.length && !session.courseId && !session.topic) {
-=======
-    if (!session.questions.length) {
->>>>>>> origin/main
       globalThis.localStorage?.removeItem(KEY);
       return;
     }

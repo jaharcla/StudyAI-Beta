@@ -1,13 +1,13 @@
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { cacheDirectory, diffCourses, fingerprintCourse, readCache, writeCache } from "./cache.mjs";
 import { isReauthError, McpConnector } from "./mcp-client.mjs";
 import { generateQuestions, normalizePages, DEFAULT_MODEL } from "./practice.mjs";
-<<<<<<< HEAD
 import { createMcpHandler } from "./mcp-gateway.mjs";
-=======
->>>>>>> origin/main
+import { buildCourseOverview } from "./course-intelligence.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const port = Number(process.env.STUDYAI_API_PORT || 4174);
@@ -16,7 +16,6 @@ let cache = await readCache();
 let status = { state: "not-configured", updatedAt: new Date().toISOString(), lastSuccessAt: cache.lastSuccessAt };
 let syncChain = Promise.resolve();
 const materialCache = new Map();
-<<<<<<< HEAD
 async function localModels() {
   try {
     const response = await fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(2500) });
@@ -28,8 +27,24 @@ async function localModels() {
     return { available: false, models: [], preferred: DEFAULT_MODEL, message: "Ollama is unavailable on this computer. Start Ollama to generate real questions." };
   }
 }
-=======
->>>>>>> origin/main
+
+const execFileAsync = promisify(execFile);
+const SOFFICE_CANDIDATES = [
+  'soffice',
+  'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+  'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+];
+async function checkLibreOffice() {
+  for (const bin of SOFFICE_CANDIDATES) {
+    try {
+      await execFileAsync(bin, ['--version'], { timeout: 15_000 });
+      return { available: true, binary: bin };
+    } catch {
+      // try next candidate
+    }
+  }
+  return { available: false, binary: null };
+}
 
 function setStatus(state, message, lastSuccessAt = status.lastSuccessAt) {
   status = { state, updatedAt: new Date().toISOString(), lastSuccessAt, ...(message ? { message } : {}) };
@@ -98,10 +113,11 @@ function requireTopic(topicId) {
 }
 function errorResponse(response, error) {
   const auth = isReauthError(error);
+  const status = error?.status || (auth ? "reauth-required" : "error");
   const code = error?.statusCode || (auth ? 401 : 502);
   const message = error instanceof Error ? error.message : "Request failed.";
   if (auth) setStatus("reauth-required", "Waterloo LEARN login required.");
-  json(response, { error: message, status: auth ? "reauth-required" : "error" }, code);
+  json(response, { error: message, status }, code);
 }
 async function readJsonBody(request) {
   let raw = "";
@@ -116,23 +132,36 @@ async function fetchMaterial(courseId, topicId) {
   const key = courseId + ":" + topicId;
   const cached = materialCache.get(key);
   if (cached && Date.now() - cached.cachedAt < 20 * 60 * 1000) return cached.material;
-  const result = await connector.getTopicFile(Number(courseId), topicId, "1-8");
-  const pages = normalizePages(result?.pages);
+  let result;
+  try {
+    result = await connector.getTopicText(Number(courseId), topicId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/not a (PDF|PowerPoint|Word|document)/i.test(message) || /only those can be rendered/i.test(message)) {
+      throw Object.assign(new Error("This topic type is not directly readable in StudyAI. Open the original in LEARN."), { statusCode: 422, status: "unsupported" });
+    }
+    throw error;
+  }
+  const pages = normalizePages(result.pages);
+  const hasEmptyPages = result.emptyPages.length > 0;
   const material = {
     courseId,
     topicId,
-    title: result?.filename || "Lecture",
-    totalPages: result?.totalPages || pages.length,
+    title: result.filename || "Lecture",
+    totalPages: result.totalPages,
     pages,
     source: "Waterloo LEARN via local MCP",
-    note: result?.note || "First eight pages only; page text may omit information in diagrams.",
+    note: result.note || undefined,
+    fetchedPageCount: result.fetchedPageCount,
+    emptyPages: result.emptyPages,
+    coverage: result.totalPages > 0 ? Math.round(result.fetchedPageCount / result.totalPages * 100) : 0,
+    status: hasEmptyPages ? "partial" : "ready",
   };
   if (materialCache.size >= 8) materialCache.delete(materialCache.keys().next().value);
   materialCache.set(key, { material, cachedAt: Date.now() });
   return material;
 }
 
-<<<<<<< HEAD
 const handleMcp = createMcpHandler({
   listCourses: () => ({ courses: cache.courses.map(publicCourse), status }),
   getModules: async (courseId) => connector.getContent(requireCourse(courseId)),
@@ -144,16 +173,37 @@ const server = http.createServer(async (request, response) => {
   if (path === "/mcp") return handleMcp(request, response);
   if (request.method === "GET" && path === "/api/health") return json(response, { ...status, localModel: DEFAULT_MODEL });
   if (request.method === "GET" && path === "/api/models") return json(response, await localModels());
-=======
-const server = http.createServer(async (request, response) => {
-  const url = new URL(request.url || "/", "http://127.0.0.1");
-  const path = url.pathname;
-  if (request.method === "GET" && path === "/api/health") return json(response, { ...status, localModel: DEFAULT_MODEL });
->>>>>>> origin/main
+  if (request.method === "GET" && path === "/api/health/libreoffice") return json(response, await checkLibreOffice());
   if (request.method === "GET" && path === "/api/courses") return json(response, { courses: cache.courses.map(publicCourse), status });
   if (request.method === "POST" && path === "/api/courses/sync") {
     try { return json(response, await sync()); }
     catch (error) { return json(response, { courses: cache.courses.map(publicCourse), status }, error.statusCode || 503); }
+  }
+  // Course-wide data sources; expensive indexing only runs when the student requests it.
+  const intelligence = /^\/api\/courses\/(\d+)\/(overview|exam-context|search)$/.exec(path);
+  if (intelligence && request.method === "GET") {
+    try {
+      const courseId = intelligence[1];
+      const id = requireCourse(courseId);
+      if (intelligence[2] === "overview") {
+        return json(response, await buildCourseOverview(connector, id, {
+          refresh: url.searchParams.get("refresh") === "1",
+          full: url.searchParams.get("full") === "1",
+        }));
+      }
+      if (intelligence[2] === "exam-context") {
+        const assessment = (url.searchParams.get("assessment") || "final exam").slice(0, 100);
+        return json(response, { courseId, context: await connector.getExamContext(id, assessment),
+          source: "Waterloo LEARN exam context" });
+      }
+      const query = (url.searchParams.get("q") || "").trim();
+      if (query.length < 2 || query.length > 200) {
+        throw Object.assign(new Error("Enter a search topic (2–200 characters)."), { statusCode: 400 });
+      }
+      return json(response, { courseId, query,
+        search: await connector.searchCourseMaterials(id, query, 12, 12),
+        source: "Waterloo LEARN course-material search" });
+    } catch (error) { return errorResponse(response, error); }
   }
   const route = /^\/api\/courses\/(\d+)\/(modules|material)$/.exec(path);
   if (route && request.method === "GET") {
@@ -175,7 +225,6 @@ const server = http.createServer(async (request, response) => {
       const courseId = String(body?.courseId ?? "");
       const id = requireCourse(courseId);
       const topicId = requireTopic(body?.topicId);
-<<<<<<< HEAD
       const requestedModel = typeof body.model === "string" ? body.model : undefined;
       if (requestedModel && (requestedModel.length > 100 || /[^a-zA-Z0-9._:\/-]/.test(requestedModel))) {
         throw Object.assign(new Error("Invalid local model name."), { statusCode: 400 });
@@ -196,11 +245,6 @@ const server = http.createServer(async (request, response) => {
         response.off("close", onDisconnect);
       }
       return;
-=======
-      const material = await fetchMaterial(String(id), topicId);
-      const generated = await generateQuestions(material.pages, courseId + ":" + topicId);
-      return json(response, { ...generated, courseId, topicId, materialTitle: material.title, source: material.source });
->>>>>>> origin/main
     } catch (error) { return errorResponse(response, error); }
   }
   return json(response, { error: "Not found" }, 404);

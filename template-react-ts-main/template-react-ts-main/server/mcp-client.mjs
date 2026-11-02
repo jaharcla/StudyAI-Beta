@@ -63,18 +63,55 @@ export class McpConnector {
     })();
     try { return await this.connecting; } finally { this.connecting = null; }
   }
-  async call(name, args = {}) {
+  async call(name, args = {}, timeoutMs = 0) {
     const client = await this.ensureConnected();
-    const result = await client.callTool({ name, arguments: args });
+    const promise = client.callTool({ name, arguments: args });
+    if (!timeoutMs || timeoutMs <= 0) {
+      const result = await promise;
+      if (result?.isError) throw new Error(extractError(result));
+      return result;
+    }
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`MCP call "${name}" timed out after ${timeoutMs} ms`)), timeoutMs),
+    );
+    const result = await Promise.race([promise, timeout]);
     if (result?.isError) throw new Error(extractError(result));
     return result;
   }
-  async listCourses() { return this.call("list_courses"); }
-  async getContent(courseId) { return structuredResult(await this.call("get_content", { courseId }), "modules"); }
+  async listCourses() { return this.call("list_courses", {}, 30000); }
+  async getContent(courseId) { return structuredResult(await this.call("get_content", { courseId }, 60000), "modules"); }
+  async getUpcoming(courseId, daysAhead = 30) {
+    return structuredResult(await this.call("get_upcoming", { courseId, daysAhead }, 60000), "events");
+  }
+  async getAnnouncements(courseId) {
+    return structuredResult(await this.call("get_announcements", { courseId }, 60000), "announcements");
+  }
+  async getAssignments(courseId) {
+    return structuredResult(await this.call("get_assignments", { courseId }, 60000), "assignments");
+  }
+  async getGrades(courseId) {
+    return structuredResult(await this.call("get_grades", { courseId }, 60000), "grades");
+  }
+  async getOutline(courseId) {
+    const response = await this.call("get_course_outline", { courseId }, 60000);
+    return response.structuredContent ?? structuredResult(response, "outline");
+  }
+  async getExamContext(courseId, assessment = "final exam") {
+    return structuredResult(await this.call("get_exam_context", { course: courseId, assessment }, 120000), "context");
+  }
+  async searchCourseMaterials(courseId, query, maxFiles = 12, maxResults = 12) {
+    return structuredResult(await this.call("search_course_materials",
+      { course: courseId, query, maxFiles, maxResults }), "search");
+  }
   async getTopicFile(courseId, topicId, pages = "1-8") {
-    const response = await this.call("get_topic_file", { courseId, topicId, pages });
+    const response = await this.call("get_topic_file", { courseId, topicId, pages }, 240000);
     if (response?.structuredContent?.pages) return response.structuredContent;
     throw new Error("Waterloo MCP did not return readable page text.");
+  }
+  async getTopicText(courseId, topicId) {
+    const response = await this.call("get_topic_text", { courseId, topicId }, 240000);
+    if (response?.structuredContent?.pages) return response.structuredContent;
+    throw new Error("Waterloo MCP did not return readable topic text.");
   }
   async close() {
     const transport = this.transport;

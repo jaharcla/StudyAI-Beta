@@ -7,6 +7,7 @@ import {
   getCourseOutline,
   getGrades,
   getTopicFile,
+  getTopicText,
   getUpcoming,
   listCoursesWithTitles,
 } from './d2l.js';
@@ -93,6 +94,15 @@ const contentOutput = z.object({ modules: z.array(contentModuleOutput) });
 const topicFileOutput = z.object({
   filename: z.string(),
   totalPages: z.number().int(),
+  pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
+  note: z.string().optional(),
+});
+
+const topicTextOutput = z.object({
+  filename: z.string(),
+  totalPages: z.number().int(),
+  fetchedPageCount: z.number().int(),
+  emptyPages: z.array(z.number().int()),
   pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
   note: z.string().optional(),
 });
@@ -361,6 +371,44 @@ export function createServer(): McpServer {
               data: p.png.toString('base64'),
             })),
           ],
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_topic_text',
+    {
+      title: 'Get Topic File as Full Text',
+      description:
+        'Download a lecture file (PDF, PowerPoint, or Word) from course content and return the extracted ' +
+        'text from ALL pages without rendering images. Use this for text-heavy ingestion such as generating ' +
+        'practice questions. topicId is the `id` of a topic from get_content. Returns every page, coverage ' +
+        'statistics, and warnings for any unreadable pages. Use get_topic_file when you need slide images ' +
+        'or diagrams instead.',
+      inputSchema: z.object({
+        courseId,
+        topicId: z.string().describe('The topic `id` from get_content, e.g. "1234567"'),
+      }),
+      outputSchema: topicTextOutput,
+    },
+    async ({ courseId, topicId }) => {
+      try {
+        const result = await getTopicText(courseId, topicId);
+        const emptyPages = result.pages.filter((p) => !p.text || p.text.trim().length === 0).map((p) => p.page);
+        const structuredContent = {
+          filename: result.filename,
+          totalPages: result.totalPages,
+          fetchedPageCount: result.pages.length,
+          emptyPages,
+          pages: result.pages.map((p) => ({ page: p.page, text: p.text })),
+          ...(emptyPages.length > 0 ? { note: `${emptyPages.length} page(s) had no readable text.` } : {}),
+        };
+        return {
+          structuredContent,
+          content: [{ type: 'text' as const, text: JSON.stringify(structuredContent, null, 2) }],
         };
       } catch (err) {
         return errorResult(err);
