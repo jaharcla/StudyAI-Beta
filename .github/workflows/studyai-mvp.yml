@@ -1,0 +1,44 @@
+name: StudyAI MVP validation
+
+on:
+  push:
+    branches:
+      - main
+      - "fix/**"
+  pull_request:
+    paths:
+      - "template-react-ts-main/template-react-ts-main/**"
+      - ".github/workflows/studyai-mvp.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: Test, typecheck and build StudyAI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: template-react-ts-main/template-react-ts-main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: template-react-ts-main/template-react-ts-main/package-lock.json
+      - name: Ensure no unresolved merge markers
+        run: |
+          if git grep -n -E '^(<<<<<<< |=======|>>>>>>> )' -- . ':!*.orig' ':!*.rej'; then
+            echo "Unresolved merge conflicts found."
+            exit 1
+          fi
+      - name: Install dependencies
+        run: npm ci
+      - name: Run backend and frontend unit tests
+        run: npm test
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Production build
+        run: npm run build-nolog
