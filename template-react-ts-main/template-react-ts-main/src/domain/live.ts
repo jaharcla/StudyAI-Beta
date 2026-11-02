@@ -170,7 +170,6 @@ export interface LibreOfficeHealth {
 export async function checkLibreOfficeHealth(): Promise<LibreOfficeHealth> {
   return getJson<LibreOfficeHealth>("/api/health/libreoffice");
 }
-
 export async function generatePractice(courseId: string, topicId: string, model?: string, signal?: AbortSignal): Promise<PracticeResponse> {
   const result = await getJson<PracticeResponse>("/api/practice/generate", {
     method: "POST",
