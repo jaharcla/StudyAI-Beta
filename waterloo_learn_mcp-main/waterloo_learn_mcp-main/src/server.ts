@@ -1,0 +1,500 @@
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import {
+  getAnnouncements,
+  getAssignments,
+  getContent,
+  getCourseOutline,
+  getGrades,
+  getTopicFile,
+  getUpcoming,
+  listCoursesWithTitles,
+} from './d2l.js';
+import { getDriveFile, searchDriveFiles } from './drive.js';
+import { getExamContext } from './context.js';
+import { searchCourseMaterials } from './materials.js';
+import { PdfRendererError } from './pdf.js';
+
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mimeType: string; data: string };
+type ToolResult = { content: ContentBlock[]; structuredContent?: Record<string, unknown>; isError?: boolean };
+
+function errorResult(err: unknown): ToolResult {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    content: [{
+      type: 'text',
+      text: err instanceof PdfRendererError ? `[${err.code}] stage=${err.stage}: ${message}` : message,
+    }],
+    isError: true,
+  };
+}
+
+async function runStructured<T>(
+  fn: () => Promise<T>,
+  wrap: (result: T) => Record<string, unknown>,
+): Promise<ToolResult> {
+  try {
+    const result = await fn();
+    return {
+      structuredContent: wrap(result),
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (err) {
+    return errorResult(err);
+  }
+}
+
+const courseId = z.number().int().describe('The course org unit (ou) ID from list_courses, e.g. 123456');
+
+const courseOutput = z.object({
+  name: z.string(),
+  title: z.string().nullable().describe('Official course title from outline.uwaterloo.ca, e.g. "Matrices and Linear Systems"; null if unavailable'),
+  ou: z.number().int(),
+  url: z.string(),
+});
+const listCoursesOutput = z.object({ courses: z.array(courseOutput) });
+
+const announcementsOutput = z.object({
+  announcements: z.array(
+    z.object({
+      id: z.number().int(),
+      title: z.string(),
+      body: z.string(),
+      postedDate: z.string().nullable(),
+      lastModified: z.string().nullable(),
+      attachments: z.array(z.string()),
+    }),
+  ),
+});
+
+const contentTopicOutput = z.object({
+  title: z.string(),
+  type: z.string(),
+  url: z.string().nullable(),
+  id: z.string(),
+});
+const contentModuleOutput: z.ZodType<{
+  title: string;
+  moduleId: number;
+  topics: z.infer<typeof contentTopicOutput>[];
+  modules: unknown[];
+}> = z.lazy(() =>
+  z.object({
+    title: z.string(),
+    moduleId: z.number().int(),
+    topics: z.array(contentTopicOutput),
+    modules: z.array(contentModuleOutput),
+  }),
+);
+const contentOutput = z.object({ modules: z.array(contentModuleOutput) });
+
+const topicFileOutput = z.object({
+  filename: z.string(),
+  totalPages: z.number().int(),
+  pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
+  note: z.string().optional(),
+});
+
+const gradesOutput = z.object({
+  grades: z.array(
+    z.object({
+      item: z.string(),
+      type: z.string().nullable().optional(),
+      grade: z.string().nullable(),
+      points: z.string().nullable().optional(),
+      weight: z.string().nullable().optional(),
+      feedback: z.string().nullable().optional(),
+    }),
+  ),
+});
+
+const assignmentsOutput = z.object({
+  assignments: z.array(
+    z.object({
+      id: z.number().int(),
+      name: z.string(),
+      dueDate: z.string().nullable(),
+      availableUntil: z.string().nullable(),
+      instructions: z.string().nullable(),
+      attachments: z.array(z.string()),
+      outOf: z.number().nullable(),
+      submissionStatus: z.string(),
+      submittedAt: z.string().nullable(),
+      submissions: z.array(
+        z.object({
+          date: z.string(),
+          files: z.array(z.string()),
+          comment: z.string().nullable(),
+        }),
+      ),
+      feedback: z
+        .object({
+          score: z.number().nullable(),
+          comment: z.string().nullable(),
+          files: z.array(z.string()),
+        })
+        .nullable(),
+    }),
+  ),
+});
+
+const outlineOutput = z.object({
+  url: z.string(),
+  title: z.string(),
+  text: z.string(),
+});
+
+const upcomingOutput = z.object({
+  events: z.array(
+    z.object({
+      title: z.string(),
+      start: z.string(),
+      end: z.string().nullable(),
+      allDay: z.boolean(),
+      description: z.string().nullable(),
+    }),
+  ),
+});
+
+const driveFileOutput = z.object({
+  fileId: z.string(),
+  name: z.string(),
+  path: z.string(),
+  mimeType: z.string(),
+  size: z.number().int().nullable(),
+  modifiedTime: z.string().nullable(),
+  url: z.string(),
+});
+const driveSearchOutput = z.object({
+  query: z.string().nullable(),
+  folderIds: z.array(z.string()),
+  files: z.array(driveFileOutput),
+  indexedFiles: z.number().int(),
+});
+const examContextOutput = z.object({ context: z.unknown() });
+const materialSearchOutput = z.object({ search: z.unknown() });
+
+/** Build a fresh McpServer with all LEARN tools registered. */
+export function createServer(): McpServer {
+  const server = new McpServer({ name: 'waterloo-learn', version: '0.1.0' });
+
+  server.registerTool(
+    'list_courses',
+    {
+      title: 'List Courses',
+      description:
+        'List the courses you are enrolled in on Waterloo LEARN. Returns course names and their ou ' +
+        '(org unit) IDs, which the other tools take as courseId. Use to answer: "What courses am I taking?"',
+      inputSchema: z.object({}),
+      outputSchema: listCoursesOutput,
+    },
+    async () => runStructured(() => listCoursesWithTitles(), (courses) => ({ courses })),
+  );
+
+  server.registerTool(
+    'get_exam_context',
+    {
+      title: 'Prepare Exam Study Context',
+      description:
+        'FIRST tool to use when a student asks for a mock/practice exam, study guide, exam review, or exam scope. ' +
+        'Accepts a human course code/name such as "SYDE 162" (no list_courses call required), then gathers the ' +
+        'relevant instructor announcements, exam calendar events, official course outline, complete content map, ' +
+        'prioritized lesson-file topic IDs, and matching past assessments. Sources fail independently so partial ' +
+        'context is still returned with warnings. Follow recommendedFileCalls with get_topic_file before generating ' +
+        'questions, and use get_drive_file for any useful past-assessment results.',
+      inputSchema: z.object({
+        course: z
+          .union([z.string().min(1), z.number().int()])
+          .describe('Course code/name such as "SYDE 162", official title, or numeric courseId'),
+        assessment: z
+          .string()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('Assessment to prepare for, e.g. "final exam" or "midterm 2" (default: final exam)'),
+      }),
+      outputSchema: examContextOutput,
+    },
+    async ({ course, assessment }) => {
+      try {
+        const context = await getExamContext(course, assessment);
+        const summary = [
+          `Prepared ${context.assessment} context for ${context.course.name} (${context.course.ou}).`,
+          `${context.examSignals.announcements.length} relevant announcement(s), ` +
+            `${context.examSignals.upcomingEvents.length} exam event(s), ` +
+            `${context.studyMaterials.length} course material(s), ` +
+            `${context.pastAssessments.length} past assessment(s).`,
+          `Full outline, exam signals, material topic IDs, recommended file calls, and generation instructions are in structuredContent.context.`,
+          ...(context.warnings.length > 0 ? [`Warnings: ${context.warnings.join(' | ')}`] : []),
+        ].join('\n');
+        return {
+          structuredContent: { context },
+          content: [{ type: 'text' as const, text: summary }],
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_announcements',
+    {
+      title: 'Get Announcements',
+      description:
+        'Get announcements/news posted by instructors for a course. Returns title, body, posted date, ' +
+        'and attachments. Use to answer: "Any new announcements?", "What did the professor post?" ',
+      inputSchema: z.object({ courseId }),
+      outputSchema: announcementsOutput,
+    },
+    async ({ courseId }) => runStructured(() => getAnnouncements(courseId), (announcements) => ({ announcements })),
+  );
+
+  server.registerTool(
+    'search_course_materials',
+    {
+      title: 'Search Across Course PDFs and Slides',
+      description:
+        'Use after get_exam_context to scan many posted lesson PDFs/PowerPoints/Word files without loading every page into the model. ' +
+        'On first use it downloads and text-indexes up to 40 files (configurable to 60) with a 24-hour private local cache, ' +
+        'then returns page-cited passages ranked for subject concepts from the exam scope. It also returns per-file keyword ' +
+        'summaries so the agent can decide which of 20+ large decks matter. Search using actual concepts such as ' +
+        '"signal detection attention memory", not merely "final exam". Open only relevant result pages with get_topic_file ' +
+        'to inspect diagrams. One unavailable/non-PDF topic does not fail the remaining index.',
+      inputSchema: z.object({
+        course: z
+          .union([z.string().min(1), z.number().int()])
+          .describe('Course code/name such as "SYDE 162", official title, or numeric courseId'),
+        query: z
+          .string()
+          .min(1)
+          .max(2_000)
+          .describe('Subject concepts, learning objectives, or scope wording to find across all lesson files'),
+        maxFiles: z.number().int().min(1).max(60).optional()
+          .describe('Maximum posted files to index (default 40; raise for courses with more files)'),
+        maxResults: z.number().int().min(1).max(50).optional()
+          .describe('Maximum relevant page passages to return (default 24)'),
+        refresh: z.boolean().optional()
+          .describe('Ignore the 24-hour text cache and redownload files (default false)'),
+      }),
+      outputSchema: materialSearchOutput,
+    },
+    async ({ course, query, maxFiles, maxResults, refresh }) => {
+      try {
+        const search = await searchCourseMaterials(course, query, { maxFiles, maxResults, refresh });
+        return {
+          structuredContent: { search },
+          content: [{
+            type: 'text' as const,
+            text:
+              `Searched ${search.indexedFiles} file(s) / ${search.totalPages} page(s) for "${query}"; ` +
+              `returned ${search.results.length} cited passage(s). ` +
+              `${search.cachedFiles} file(s) came from the private cache; ${search.failedFiles} failed. ` +
+              'Full material keyword summaries, passages, page citations, and image follow-up calls are in structuredContent.search.' +
+              (search.warnings.length > 0 ? ` Warnings: ${search.warnings.join(' | ')}` : ''),
+          }],
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_content',
+    {
+      title: 'Get Course Content',
+      description:
+        'List the content modules and materials (lectures, slides, files, links) for a course as a ' +
+        'nested table of contents. Use this as the primary source for course activity questions like ' +
+        '"what did we do today?", "what was in today\'s tutorial/lab/lecture?", "what is this week\'s work?", ' +
+        '"what materials are in week 3?", or "where are the lecture slides?". After identifying relevant topics, ' +
+        'call get_topic_file to inspect PDFs or PowerPoints.',
+      inputSchema: z.object({ courseId }),
+      outputSchema: contentOutput,
+    },
+    async ({ courseId }) => runStructured(() => getContent(courseId), (modules) => ({ modules })),
+  );
+
+  server.registerTool(
+    'get_topic_file',
+    {
+      title: 'Get Topic File as Slide Images',
+      description:
+        'Download a lecture file (PDF, PowerPoint, or Word) from course content and return each page/slide ' +
+        'as both searchable extracted text and an image — preserving diagrams and figures while making ' +
+        'large decks efficient to analyze. topicId is the `id` of a topic from ' +
+        'get_content. Slide N = page N; pass pages like "4" or "2-6" to fetch specific slides instead of ' +
+        'the whole deck. Use after get_content to answer: "Summarize lesson 2", "What is the diagram on slide 4?"',
+      inputSchema: z.object({
+        courseId,
+        topicId: z.string().describe('The topic `id` from get_content, e.g. "1234567"'),
+        pages: z
+          .string()
+          .optional()
+          .describe('Pages/slides to render, e.g. "4", "1-5", or "2,4,7-9". Default: the whole document (capped at 30 per call; the response notes how to fetch the rest).'),
+      }),
+      outputSchema: topicFileOutput,
+    },
+    async ({ courseId, topicId, pages }) => {
+      try {
+        const result = await getTopicFile(courseId, topicId, pages);
+        const structuredContent = {
+          filename: result.filename,
+          totalPages: result.totalPages,
+          pages: result.pages.map((p) => ({ page: p.page, text: p.text })),
+          ...(result.note ? { note: result.note } : {}),
+        };
+        const header =
+          `${result.filename} — ${result.totalPages} page(s); showing ` +
+          `${result.pages.map((p) => p.page).join(', ')}.` +
+          (result.note ? ` ${result.note}` : '');
+        return {
+          structuredContent,
+          content: [
+            { type: 'text' as const, text: header },
+            ...result.pages.map((p) => ({
+              type: 'image' as const,
+              mimeType: 'image/png',
+              data: p.png.toString('base64'),
+            })),
+          ],
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_grades',
+    {
+      title: 'Get Grades',
+      description:
+        'Get your grades for a course: each grade item with displayed grade, points, weight, and feedback. ' +
+        'Use to answer: "What are my grades?", "How did I do on the midterm?"',
+      inputSchema: z.object({ courseId }),
+      outputSchema: gradesOutput,
+    },
+    async ({ courseId }) => runStructured(() => getGrades(courseId), (grades) => ({ grades })),
+  );
+
+  server.registerTool(
+    'get_assignments',
+    {
+      title: 'Get Assignments',
+      description:
+        'Get assignments (dropbox folders) for a course: due date, instructions, attached problem sheets, ' +
+        'your submission status (submitted/unsubmitted), submitted files, and released feedback/score. ' +
+        'Use to answer: "Have I submitted Assignment 5?", "What is still due?", "What feedback did I get?"',
+      inputSchema: z.object({ courseId }),
+      outputSchema: assignmentsOutput,
+    },
+    async ({ courseId }) => runStructured(() => getAssignments(courseId), (assignments) => ({ assignments })),
+  );
+
+  server.registerTool(
+    'get_upcoming',
+    {
+      title: 'Get Upcoming Due Dates',
+      description:
+        'Get upcoming calendar events and due dates (assignments, quizzes, exams) for a course. ' +
+        'Use to answer: "What is due this week?", "When is the next deadline?", or "what work is due today?". ' +
+        'This does not list lecture/tutorial materials; pair it with get_content for "what did we do today/this week?"',
+      inputSchema: z.object({
+        courseId,
+        daysAhead: z.number().int().min(1).max(365).optional()
+          .describe('How many days ahead to look (default 30)'),
+      }),
+      outputSchema: upcomingOutput,
+    },
+    async ({ courseId, daysAhead }) => runStructured(() => getUpcoming(courseId, daysAhead), (events) => ({ events })),
+  );
+
+  server.registerTool(
+    'get_course_outline',
+    {
+      title: 'Get Course Outline',
+      description:
+        'Fetch the official syllabus and return its full text. ' +
+        'Use to answer: "What is the grading scheme?", "How much is the midterm worth?", "What is the late policy?", ' +
+        'Use this tool WHENEVER user asks about content with chronological language,' +
+        'like "today", "this week", etc.' +
+        'Outlines have a week-by-week schedule, ALWAYS use it to orient chronologically — ' +
+        'then call get_content & get_topic_file to pull matching lecture materials. If no outline ' +
+        'link exists, check get_content',
+      inputSchema: z.object({ courseId }),
+      outputSchema: outlineOutput,
+    },
+    async ({ courseId }) =>
+      runStructured(() => getCourseOutline(courseId), (outline) => ({ ...outline })),
+  );
+
+  server.registerTool(
+    'search_drive_files',
+    {
+      title: 'Search Past Assessments in Google Drive',
+      description:
+        'Recursively search the configured Google Drive folder for relevant past quizzes, tests, midterms, exams, ' +
+        'practice material, and solutions. Search by course code and useful terms, for example "CS 135 quiz" or ' +
+        '"MATH 136 midterm". With no query, returns assessment-like files. Use get_drive_file to inspect a result.',
+      inputSchema: z.object({
+        query: z.string().max(200).optional().describe('Course code and/or assessment terms, e.g. "CS 135 quiz"'),
+        limit: z.number().int().min(1).max(100).optional().describe('Maximum results to return (default 20)'),
+      }),
+      outputSchema: driveSearchOutput,
+    },
+    async ({ query, limit }) =>
+      runStructured(() => searchDriveFiles(query, limit), (result) => ({ ...result })),
+  );
+
+  server.registerTool(
+    'get_drive_file',
+    {
+      title: 'Get Google Drive File as Page Images',
+      description:
+        'Download and inspect a file returned by search_drive_files. PDFs, PowerPoints, Google Docs, and Google Slides ' +
+        'return searchable page text plus rendered images. Access is restricted to files inside the configured Drive folder.',
+      inputSchema: z.object({
+        fileId: z.string().describe('The fileId returned by search_drive_files'),
+        pages: z
+          .string()
+          .optional()
+          .describe('Pages/slides to render, e.g. "4", "1-5", or "2,4,7-9". Default: first 30 pages.'),
+      }),
+      outputSchema: topicFileOutput,
+    },
+    async ({ fileId, pages }) => {
+      try {
+        const result = await getDriveFile(fileId, pages);
+        return {
+          structuredContent: {
+            filename: result.filename,
+            totalPages: result.totalPages,
+            pages: result.pages.map((page) => ({ page: page.page, text: page.text })),
+            ...(result.note ? { note: result.note } : {}),
+          },
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                `${result.filename} - ${result.totalPages} page(s); showing ${result.pages.map((page) => page.page).join(', ')}.` +
+                (result.note ? ` ${result.note}` : ''),
+            },
+            ...result.pages.map((page) => ({
+              type: 'image' as const,
+              mimeType: 'image/png',
+              data: page.png.toString('base64'),
+            })),
+          ],
+        };
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  return server;
+}
