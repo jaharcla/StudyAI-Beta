@@ -1,0 +1,16 @@
+node_modules/
+dist/
+
+# Saved Playwright session — contains live auth cookies. Never commit.
+auth.json
+
+# Optional local credentials/config.
+.env.local
+
+# Cached course outline HTML/text. Treat as private course material.
+cache/
+
+*.log
+.DS_Store
+
+graphify-out/

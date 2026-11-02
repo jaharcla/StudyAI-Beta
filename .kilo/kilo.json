@@ -1,0 +1,16 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "permission": {
+    "waterloo-learn_*": "ask"
+  },
+  "mcp": {
+    "waterloo-learn": {
+      "type": "local",
+      "command": [
+        "node",
+        "C:\\Users\\Owner\\Downloads\\StudyAI-Beta\\waterloo_learn_mcp-main\\waterloo_learn_mcp-main\\dist\\index.js"
+      ],
+      "enabled": true
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "waterloo-learn-mcp",
+  "version": "0.1.0",
+  "description": "Read-only local MCP server for University of Waterloo LEARN",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "setup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1",
+    "build": "tsc",
+    "login": "tsx scripts/login.ts && npm run register",
+    "register": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register.ps1",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/petersenmatthew/waterloo-learn-mcp.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/petersenmatthew/waterloo-learn-mcp/issues"
+  },
+  "homepage": "https://github.com/petersenmatthew/waterloo-learn-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@napi-rs/canvas": "^0.1.100",
+    "pdfjs-dist": "^4.10.38",
+    "playwright": "^1.60.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
