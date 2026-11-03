@@ -139,15 +139,7 @@ async function fetchMaterial(courseId, topicId) {
   const cached = materialCache.get(key);
   if (cached && Date.now() - cached.cachedAt < 20 * 60 * 1000) return cached.material;
   let result;
-  try {
-    result = await connector.getTopicText(Number(courseId), topicId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/not a (PDF|PowerPoint|Word|document)/i.test(message) || /only those can be rendered/i.test(message)) {
-      throw Object.assign(new Error("This topic type is not directly readable in StudyAI. Open the original in LEARN."), { statusCode: 422, status: "unsupported" });
-    }
-    throw error;
-  }
+  result = await connector.getTopicText(Number(courseId), topicId);
   const pages = normalizePages(result.pages);
   const emptyPages = Array.isArray(result.emptyPages) ? result.emptyPages : [];
   const totalPages = Number.isInteger(result.totalPages) ? result.totalPages : pages.length;
@@ -161,12 +153,14 @@ async function fetchMaterial(courseId, topicId) {
     totalPages,
     pages,
     source: "Waterloo LEARN via local MCP",
-    note: result.note || undefined,
+    sourceUrl: result.sourceUrl || undefined,
+    kind: result.kind || undefined,
+    note: result.reason || result.note || undefined,
     fetchedPageCount,
     emptyPages,
     // "coverage" measures usable text, not simply downloaded slides.
     coverage: totalPages > 0 ? Math.round(readablePageCount / totalPages * 100) : 0,
-    status: incomplete ? "partial" : "ready",
+    status: result.status === "open-original" ? "open-original" : incomplete ? "partial" : "ready",
   };
   if (materialCache.size >= 8) materialCache.delete(materialCache.keys().next().value);
   materialCache.set(key, { material, cachedAt: Date.now() });
@@ -276,3 +270,4 @@ async function shutdown() { await learnAuth.stop(); await connector.close(); ser
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 export { normalizedCourse, parseCourses, setStatus, doSync, cacheDirectory };
+

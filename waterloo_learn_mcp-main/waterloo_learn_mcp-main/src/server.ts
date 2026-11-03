@@ -105,6 +105,10 @@ const topicTextOutput = z.object({
   emptyPages: z.array(z.number().int()),
   pages: z.array(z.object({ page: z.number().int(), text: z.string() })),
   note: z.string().optional(),
+  status: z.enum(['ready', 'partial', 'open-original']).optional(),
+  kind: z.string().optional(),
+  sourceUrl: z.string().optional(),
+  reason: z.string().optional(),
 });
 
 const gradesOutput = z.object({
@@ -405,6 +409,11 @@ export function createServer(): McpServer {
           emptyPages,
           pages: result.pages.map((p) => ({ page: p.page, text: p.text })),
           ...(emptyPages.length > 0 ? { note: `${emptyPages.length} page(s) had no readable text.` } : {}),
+          ...(result.note ? { note: result.note } : {}),
+          ...(result.status ? { status: result.status } : {}),
+          ...(result.kind ? { kind: result.kind } : {}),
+          ...(result.sourceUrl ? { sourceUrl: result.sourceUrl } : {}),
+          ...(result.reason ? { reason: result.reason } : {}),
         };
         return {
           structuredContent,
@@ -546,3 +555,4 @@ export function createServer(): McpServer {
 
   return server;
 }
+

@@ -109,7 +109,7 @@ export class McpConnector {
     throw new Error("Waterloo MCP did not return readable page text.");
   }
   async getTopicText(courseId, topicId) {
-    const response = await this.call("get_topic_text", { courseId, topicId }, 240000);
+    const response = await this.call("get_topic_text", { courseId, topicId }, 600000);
     if (response?.structuredContent?.pages) return response.structuredContent;
     throw new Error("Waterloo MCP did not return readable topic text.");
   }
@@ -125,3 +125,4 @@ export function isReauthError(error) {
   const text = String(error?.message || error).toLowerCase();
   return /401|403|unauthori[sz]|forbidden|redirect|login|auth|session|cookie|credential|expired/.test(text);
 }
+
