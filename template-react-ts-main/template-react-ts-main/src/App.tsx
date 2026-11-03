@@ -5,7 +5,7 @@ import { getConnectorStatus, getCourses, syncCourses } from "./domain/connector"
 import { LocalStorageProgress } from "./domain/persistence";
 import { readLastSession, saveLastSession } from "./domain/session";
 import { DEMO_MATERIAL, evaluateAnswer, identifyObjectives, makeQuestion, rankRecommendations, updateMastery } from "./domain/study";
-import { cancelLearnLogin, flattenTopics, generatePractice, getLearnAuthStatus, getLocalModels, isReadableTopic, learnOriginalUrl, loadCourseModules, loadLecture, startLearnLogin, topicExtension } from "./domain/live";
+import { cancelLearnLogin, flattenTopics, generatePractice, getLearnAuthStatus, getLocalModels, learnOriginalUrl, loadCourseModules, loadLecture, startLearnLogin, topicExtension, topicKind, topicOriginalUrl } from "./domain/live";
 import type { LearnAuthStatus, LearnModule, LearnTopic, LectureMaterial, ModelStatus, PracticeResponse } from "./domain/live";
 import type { ConnectorSyncStatus, CourseSummary, MasteryState, MultipleChoiceQuestion } from "./domain/contracts";
 
@@ -26,7 +26,11 @@ function kind(topic: LearnTopic): Filter {
 function fileLabel(topic: LearnTopic) {
   const ext = topicExtension(topic);
   const type = kind(topic);
-  return type === "slides" ? "SLIDES" : type === "pdf" ? "PDF" : type === "docs" ? "DOC" : ext === "html" ? "PAGE" : ["mp4", "webm"].includes(ext) ? "VIDEO" : topic.type.toLowerCase() === "link" || ext === "d2l" ? "LINK" : "FILE";
+  if (["xls", "xlsx", "ods", "csv", "tsv"].includes(ext)) return "DATA";
+  if (["txt", "md", "rtf", "odt"].includes(ext)) return "TEXT";
+  if (["png", "jpg", "jpeg", "tif", "tiff"].includes(ext)) return "IMAGE";
+  if (["mp3", "wav", "m4a"].includes(ext)) return "AUDIO";
+  return type === "slides" ? "SLIDES" : type === "pdf" ? "PDF" : type === "docs" ? "DOC" : topicKind(topic).toUpperCase();
 }
 function timeLabel(seconds: number) {
   return seconds < 60 ? seconds + "s" : Math.floor(seconds / 60) + "m " + String(seconds % 60).padStart(2, "0") + "s";
@@ -48,7 +52,6 @@ export default function App() {
   const [courseId, setCourseId] = useState(restored?.courseId ?? "");
   const [modules, setModules] = useState<LearnModule[]>([]);
   const [topic, setTopic] = useState<LearnTopic | null>(restored?.topic ?? null);
-  const [unsupportedTopic, setUnsupportedTopic] = useState<LearnTopic | null>(null);
   const [material, setMaterial] = useState<LectureMaterial | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
@@ -262,14 +265,8 @@ export default function App() {
   }
   async function chooseTopic(item: LearnTopic) {
     if (!courseId) return;
-    if (!isReadableTopic(item)) {
-      setUnsupportedTopic(item);
-      setError("This LEARN topic is not a supported document type. Your current study session is preserved.");
-      return;
-    }
     const seq = ++requestId.current;
     generator.current?.abort();
-    setUnsupportedTopic(null);
     setTopic(item); setMaterial(null); clearQuestions();
     setPreviewOpen(false); setError(""); setLoading("lecture");
     try {
@@ -364,7 +361,7 @@ export default function App() {
         <div className="hero-stats"><div><b>{courses.filter(c => c.dataSource.kind === "waterloo-mcp").length}</b><span>courses</span></div><div><b>{topics.length}</b><span>materials</span></div></div>
       </section>
       <div className="journey" aria-label="Study workflow"><span className={courseId ? "complete" : "current"}><b>01</b> Course</span><i/><span className={material ? "complete" : topic ? "current" : ""}><b>02</b> Lecture</span><i/><span className={questions.length ? "current" : ""}><b>03</b> Challenge</span></div>
-      {error && <div className="experience-alert" role="alert"><span>{error}{learnOriginalUrl(unsupportedTopic?.url ?? topic?.url) && <> <a href={learnOriginalUrl(unsupportedTopic?.url ?? topic?.url) as string} target="_blank" rel="noreferrer">Open original in LEARN</a></>}</span><button aria-label="Dismiss alert" onClick={() => {setError("");setUnsupportedTopic(null);}}>×</button></div>}
+      {error && <div className="experience-alert" role="alert"><span>{error}{learnOriginalUrl(topic?.url) && <> <a href={learnOriginalUrl(topic?.url) as string} target="_blank" rel="noreferrer">Open original in LEARN</a></>}</span><button aria-label="Dismiss alert" onClick={() => setError("")}>×</button></div>}
       <div className="experience-layout">
         <aside className="library" aria-label="Course library">
           <div className="library-title"><div><small>YOUR LIBRARY</small><h2>Find a lesson</h2></div><span aria-hidden="true">⌕</span></div>
@@ -397,12 +394,12 @@ export default function App() {
         <section className="study-column" ref={stage}>
           {courseId && loading !== "modules" && <CourseHub key={courseId} courseId={courseId} courseName={currentCourse?.title || currentCourse?.code || "Selected course"} topics={topics} onOpenTopic={item => void chooseTopic(item)} />}
           <article className="source-card">
-            <div className="source-top"><span className="eyebrow">{material ? "REAL COURSE MATERIAL" : "YOUR NEXT STUDY SESSION"}</span><span>{material ? material.coverage != null ? material.coverage + "% of " + material.totalPages + " pages (" + material.pages.length + " extracted)" : material.pages.length + " of " + material.totalPages + " pages" : "LEARN → PRACTICE"}</span></div>
+            <div className="source-top"><span className="eyebrow">{material?.status === "open-original" ? (material.kind || "LEARN activity").toUpperCase() : material ? "REAL COURSE MATERIAL" : "YOUR NEXT STUDY SESSION"}</span><span>{material?.status === "open-original" ? "OPEN ORIGINAL" : material ? material.coverage != null ? material.coverage + "% of " + material.totalPages + " pages (" + material.pages.length + " extracted)" : material.pages.length + " of " + material.totalPages + " pages" : "LEARN → PRACTICE"}</span></div>
             <h2>{material ? (topic?.title || material.title) : topic ? "Opening " + topic.title : "Choose a lecture to begin"}</h2>
             <p className="source-sub">{material ? (currentCourse?.code || "Waterloo LEARN") + " · " + material.title : "Build practice directly from your own course materials."}</p>
             {material?.status === "partial" && <p className="source-note" role="status">{material.emptyPages?.length} page(s) had no readable text. Questions will be drawn from the extracted pages only.</p>}
-            {loading === "lecture" && <div className="activity-status"><span className="spin"/> Retrieving and converting lecture material locally…</div>}
-            {material ? <>
+            {loading === "lecture" && <div className="activity-status"><span className="spin"/> Reading LEARN content and available media transcripts locally…</div>}
+            {material?.status === "open-original" ? <div className="source-empty"><span aria-hidden="true">↗</span><p>{material.note}</p>{topicOriginalUrl(material.sourceUrl ?? topic?.url) && <a className="reopen-lecture" href={topicOriginalUrl(material.sourceUrl ?? topic?.url) as string} target="_blank" rel="noopener noreferrer">Open original →</a>}</div> : material ? <>
               <div className="material-summary"><div><strong>{material.pages.length} pages extracted</strong><span>{material.source}</span>{material.coverage != null && <span className="coverage-badge">Coverage: {material.coverage}%</span>}</div><button onClick={() => setPreviewOpen(v => !v)} aria-expanded={previewOpen}>{previewOpen ? "Hide" : "Preview"} text</button></div>
               {previewOpen && <div className="material-preview">{material.pages.map(p => <p key={p.page}><b>Page {p.page}</b>{p.text || "No readable text extracted on this page."}</p>)}</div>}
               <p className="source-note">{material.note}</p>
@@ -438,3 +435,4 @@ export default function App() {
     </main>
   );
 }
+

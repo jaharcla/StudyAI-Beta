@@ -1,1 +1,5 @@
 .studyai-private/
+.venv/
+**/.venv/
+**/__pycache__/
+

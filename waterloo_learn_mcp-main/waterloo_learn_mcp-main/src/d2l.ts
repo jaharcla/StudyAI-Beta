@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { BASE_URL, LOGIN_HELP, OUTLINE_CACHE_DIR } from './config.js';
 import { pdfToPng } from './pdf.js';
@@ -609,6 +610,53 @@ export interface TopicTextResult {
   filename: string;
   totalPages: number;
   pages: { page: number; text: string }[];
+  status?: 'ready' | 'partial' | 'open-original';
+  kind?: string;
+  sourceUrl?: string;
+  reason?: string;
+  note?: string;
+}
+
+async function ocrImage(input: Buffer, extension = '.png'): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'learn-ocr-'));
+  const imagePath = path.join(dir, `source${['.jpg', '.jpeg', '.tif', '.tiff', '.png'].includes(extension) ? extension : '.png'}`);
+  try {
+    await fs.writeFile(imagePath, input);
+    const result = await execFileAsync('tesseract', [imagePath, 'stdout'], { timeout: 30_000, maxBuffer: 2_000_000 });
+    return result.stdout.trim();
+  } catch { return ''; }
+  finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function transcribeMedia(input: Buffer, filename: string): Promise<string> {
+  if (input.length > 500_000_000) throw new Error('This media file exceeds the 500 MB transcription limit.');
+  const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+  const python = process.env.STUDYAI_TRANSCRIBE_PYTHON || path.join(packageDir, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  const script = fileURLToPath(new URL('../scripts/transcribe.py', import.meta.url));
+  await fs.access(python);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'learn-transcribe-'));
+  const ext = path.extname(filename).toLowerCase().replace(/[^.a-z0-9]/g, '');
+  const inputPath = path.join(dir, `media${ext || '.bin'}`);
+  try {
+    await fs.writeFile(inputPath, input);
+    const { stdout } = await execFileAsync(python, [script, inputPath], { timeout: 600_000, maxBuffer: 8_000_000 });
+    const result = JSON.parse(stdout) as { language?: string; segments?: Array<{ start: number; end: number; text: string }> };
+    const transcript = (result.segments ?? []).map((segment) => {
+      const timestamp = (seconds: number) => new Date(seconds * 1000).toISOString().slice(11, 23);
+      return `[${timestamp(segment.start)}–${timestamp(segment.end)}] ${segment.text}`;
+    }).join('\n').slice(0, 500_000);
+    if (!/\.(mp4|webm|mov|mkv|avi|mpeg|mpg)$/i.test(ext)) return transcript;
+    const framesDir = path.join(dir, 'frames');
+    await fs.mkdir(framesDir);
+    await execFileAsync('ffmpeg', ['-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-i', inputPath, '-vf', 'fps=1/30,scale=1280:-2', '-frames:v', '120', path.join(framesDir, 'frame-%03d.png')], { timeout: 180_000, maxBuffer: 1_000_000 }).catch(() => null);
+    const frameFiles = (await fs.readdir(framesDir)).filter((name) => /^frame-\d+\.png$/.test(name)).sort().slice(0, 120);
+    const visuals: string[] = [];
+    for (let i = 0; i < frameFiles.length; i++) {
+      const text = await ocrImage(await fs.readFile(path.join(framesDir, frameFiles[i])));
+      if (text) visuals.push(`[On-screen text at ${new Date(i * 30_000).toISOString().slice(11, 19)}] ${text}`);
+    }
+    return [transcript, ...visuals].filter(Boolean).join('\n').slice(0, 800_000);
+  } finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
 }
 
 /** Parse "4", "1-5", or "2,4,7-9" into a sorted list of unique 1-based page numbers. */
@@ -684,21 +732,23 @@ async function downloadTopicPdf(courseId: number, topicId: string): Promise<{ fi
     file = await apiGetBinary(`/d2l/le/content/${courseId}/topics/files/download/${topicId}/DirectFileTopicDownload`);
   }
 
-  const filename = file.filename ?? 'file';
+  let filename = file.filename ?? 'file';
   const ext = path.extname(filename).toLowerCase();
   const isPdf = ext === '.pdf' || file.contentType.includes('application/pdf') || file.body.subarray(0, 4).toString() === '%PDF';
-  const isPpt = ext === '.pptx' || ext === '.ppt' || file.contentType.includes('presentation');
-  const isWord = ext === '.docx' || ext === '.doc' || file.contentType.includes('wordprocessingml');
+  const zipEntries = file.body.subarray(0, Math.min(file.body.length, 2_000_000)).toString('latin1');
+  const archiveFormat = /word\/document\.xml/i.test(zipEntries) ? 'docx' : /xl\/workbook\.xml/i.test(zipEntries) ? 'xlsx' : /ppt\/presentation\.xml/i.test(zipEntries) ? 'pptx' : /\/content\.xml/i.test(zipEntries) ? 'odt' : '';
+  const isOffice = /\.(pptx?|docx?|xlsx?|od[pts]|rtf|csv|tsv)$/i.test(filename) ||
+    /presentation|wordprocessingml|spreadsheetml|ms-excel|msword/.test(file.contentType) || Boolean(archiveFormat);
+  if (ext === '' && archiveFormat) filename += `.${archiveFormat}`;
 
   let pdf: Buffer;
   if (isPdf) {
     pdf = file.body;
-  } else if (isPpt || isWord) {
+  } else if (isOffice) {
     pdf = await officeToPdf(file.body, filename);
   } else {
     throw new Error(
-      `Topic file "${filename}" (${file.contentType || 'unknown type'}) is not a PDF, PowerPoint, or Word document — ` +
-        'only those can be rendered to images. Use get_content for its URL instead.',
+      `Topic file "${filename}" (${file.contentType || 'unknown type'}) needs a text or native-content reader.`,
     );
   }
   return { filename, pdf };
@@ -706,13 +756,109 @@ async function downloadTopicPdf(courseId: number, topicId: string): Promise<{ fi
 
 /** Extract every page's text without rendering images (used by bulk indexing). */
 export async function getTopicText(courseId: number, topicId: string): Promise<TopicTextResult> {
-  const { filename, pdf } = await downloadTopicPdf(courseId, topicId);
-  const pages = await pdfToPng(pdf, { returnMetadataOnly: true, extractText: true });
-  return {
-    filename,
-    totalPages: pages.length,
-    pages: pages.map((page) => ({ page: page.pageNumber, text: page.text ?? '' })),
+  const modules = await getContent(courseId);
+  const find = (items: MarshalledModule[]): MarshalledModule['topics'][number] | undefined => {
+    for (const mod of items) {
+      const topic = mod.topics.find((item) => item.id === topicId);
+      if (topic) return topic;
+      const nested = find(mod.modules);
+      if (nested) return nested;
+    }
   };
+  const topic = find(modules);
+  const type = topic?.type ?? 'unknown';
+  const sourceUrl = topic?.url ?? undefined;
+  const ext = path.extname(topic?.title ?? '').toLowerCase() || path.extname(sourceUrl ?? '').toLowerCase();
+  const externalType = /external|quick.?link|lti|scorm|etext/i.test(type);
+  let externalUrl = false;
+  try { externalUrl = Boolean(sourceUrl) && new URL(sourceUrl!).origin !== new URL(BASE_URL).origin; } catch { externalUrl = false; }
+  const kind = /quiz|test/i.test(type) ? 'quiz' : /assignment|dropbox/i.test(type) ? 'assignment' : /discussion|forum/i.test(type) ? 'discussion' : /audio|video|media/i.test(type) || /\.(mp3|wav|m4a|aac|ogg|flac|wma|mp4|webm|mov|mkv|avi|mpeg|mpg)$/i.test(ext) ? 'media' : externalType && externalUrl ? 'external' : /html|page/i.test(type) || ['.html', '.htm'].includes(ext) ? 'html' : /\.(png|jpe?g|tiff?|gif|webp|bmp|svg)$/i.test(ext) ? 'image' : /file|document/i.test(type) || /\.(pdf|pptx?|docx?|xlsx?|od[pts]|rtf|csv|tsv|txt|md|xml|json|srt|vtt)$/i.test(ext) ? 'file' : 'learn-activity';
+  const textExts = ['.txt', '.md', '.csv', '.tsv', '.srt', '.vtt', '.xml', '.json'];
+  try {
+    if (kind === 'external') return { filename: topic?.title ?? 'LEARN activity', totalPages: 0, pages: [], status: 'open-original', kind, sourceUrl, reason: 'This item launches an external or licensed provider. StudyAI preserves its link and does not bypass provider access.' };
+    if (kind === 'media' && !['.srt', '.vtt'].includes(ext)) {
+      const file = await apiGetBinary(`/d2l/api/le/${await apiVersion('le')}/${courseId}/content/topics/${topicId}/file`);
+      const transcript = await transcribeMedia(file.body, file.filename ?? topic?.title ?? 'media');
+      if (!transcript) throw new Error('No speech was detected in this media.');
+      return { filename: file.filename ?? topic?.title ?? 'LEARN media', totalPages: 1, pages: [{ page: 1, text: transcript }], status: 'ready', kind: 'media', sourceUrl, note: 'Audio was transcribed locally and sampled video frames were checked for on-screen text. Speech transcription and OCR can misread content; verify against the original.' };
+    }
+    if (kind === 'quiz' || kind === 'assignment' || kind === 'discussion' || kind === 'learn-activity') throw new Error('Use the LEARN activity reader.');
+    if (ext === '.svg') {
+      const file = await apiGetBinary(`/d2l/api/le/${await apiVersion('le')}/${courseId}/content/topics/${topicId}/file`);
+      if (file.body.length > 20_000_000) throw new Error('This image exceeds the 20 MB processing limit.');
+      const svg = file.body.toString('utf8').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
+      const labels = svg.replace(/<[^>]*>/g, ' ').replace(/&(?:nbsp|#160);/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+      if (labels) return { filename: file.filename ?? topic?.title ?? 'LEARN image', totalPages: 1, pages: [{ page: 1, text: labels.slice(0, 200_000) }], status: 'ready', kind: 'image', sourceUrl, note: 'Text labels were read from the SVG source without rendering or running scripts.' };
+    }
+    if (/^\.(png|jpe?g|tiff?|gif|webp|bmp)$/i.test(ext)) {
+      const file = await apiGetBinary(`/d2l/api/le/${await apiVersion('le')}/${courseId}/content/topics/${topicId}/file`);
+      if (file.body.length > 20_000_000) throw new Error('This image exceeds the 20 MB processing limit.');
+      const text = await ocrImage(file.body, ext);
+      if (text) return { filename: file.filename ?? topic?.title ?? 'LEARN image', totalPages: 1, pages: [{ page: 1, text }], status: 'ready', kind: 'image', sourceUrl, note: 'Text was extracted with local OCR; verify uncertain characters against the original image.' };
+    }
+    if (textExts.includes(ext)) {
+      const file = await apiGetBinary(`/d2l/api/le/${await apiVersion('le')}/${courseId}/content/topics/${topicId}/file`);
+      if (file.body.length > 20_000_000) throw new Error('This LEARN text file exceeds the 20 MB processing limit.');
+      const raw = file.body.toString('utf8').replace(/^\uFEFF/, '');
+      const text = ext === '.json' ? JSON.stringify(JSON.parse(raw), null, 2) : ext === '.xml' ? raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : raw;
+      return { filename: file.filename ?? topic?.title ?? 'LEARN material', totalPages: 1, pages: [{ page: 1, text: text.slice(0, 200_000) }], status: 'ready', kind, sourceUrl };
+    }
+    const { filename, pdf } = await downloadTopicPdf(courseId, topicId);
+    const pages = await pdfToPng(pdf, { returnMetadataOnly: true, extractText: true });
+    let pageTexts = pages.map((page) => ({ page: page.pageNumber, text: page.text ?? '' }));
+    let note: string | undefined;
+    const empty = pageTexts.filter((page) => !page.text).map((page) => page.page);
+    if (empty.length && empty.length <= 20) {
+      const images = await pdfToPng(pdf, { pagesToProcess: empty });
+      for (const image of images) {
+        const text = await ocrImage(image.content);
+        if (text) pageTexts = pageTexts.map((page) => page.page === image.pageNumber ? { ...page, text } : page);
+      }
+      if (pageTexts.some((page) => empty.includes(page.page) && page.text)) note = 'Scanned pages were read with local OCR; verify uncertain characters against the original.';
+    }
+    return { filename, totalPages: pages.length, pages: pageTexts, status: 'ready', kind, sourceUrl, note };
+  } catch (error) {
+    if (error instanceof AuthError && !(['html', 'media'].includes(kind) && /Expected a file from/.test(error.message))) throw error;
+    if (sourceUrl) {
+      const parsed = new URL(sourceUrl);
+      if (parsed.origin === new URL(BASE_URL).origin && parsed.pathname.startsWith('/d2l/')) {
+        const page = await newPage();
+        try {
+          await page.route('**/*', (route) => {
+            try {
+              if (new URL(route.request().url()).origin === new URL(BASE_URL).origin) return route.continue();
+            } catch { /* block malformed or non-HTTP targets */ }
+            return route.abort();
+          });
+          await page.goto(parsed.href, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
+          const landed = new URL(page.url());
+          if (landed.hostname !== new URL(BASE_URL).hostname) throw new AuthError(`LEARN redirected this topic outside the authenticated course. ${LOGIN_HELP}`);
+          if (/login|signin|sso/i.test(landed.pathname)) throw new AuthError(`LEARN sign-in is required to read this activity. ${LOGIN_HELP}`);
+          const text = await page.locator('main').innerText({ timeout: 3_000 }).catch(() => page.locator('body').innerText({ timeout: 3_000 }).catch(() => ''));
+          let captions = '';
+          if (kind === 'media') {
+            const tracks = await page.locator('audio track[src], video track[src]').evaluateAll((nodes) => nodes.map((node) => (node as HTMLTrackElement).src));
+            for (const track of tracks) {
+              try {
+                const parsedTrack = new URL(track);
+                if (parsedTrack.origin !== landed.origin) continue;
+                captions += '\n' + await page.evaluate(async (href) => {
+                  const response = await fetch(href, { credentials: 'same-origin' });
+                  return response.ok ? (await response.text()).slice(0, 500_000) : '';
+                }, parsedTrack.href);
+              } catch { /* inaccessible captions are reported by the fallback */ }
+            }
+          }
+          const captionText = captions.replace(/^WEBVTT[^\n]*|\d{2}:\d{2}:\d{2}\.\d{3} -->[^\n]*/gm, '').replace(/<[^>]+>/g, ' ').trim();
+          const combined = [text, captionText && `Available captions:\n${captionText}`].filter(Boolean).join('\n\n');
+          const cleaned = combined.replace(/\n{3,}/g, '\n\n').trim().slice(0, 200_000);
+          if (cleaned) return { filename: topic?.title ?? 'LEARN activity', totalPages: 1, pages: [{ page: 1, text: cleaned }], status: 'ready', kind, sourceUrl, note: captionText ? 'Transcript extracted from LEARN captions.' : undefined };
+        } finally { await page.close(); }
+      }
+    }
+    const reason = kind === 'media' ? 'This media item is identified, but no transcript or caption track is available to the connector.' : kind === 'external' ? 'This activity is hosted by an external provider and requires opening it in LEARN.' : 'LEARN exposes this activity, but its contents are not available through the authenticated read-only view.';
+    return { filename: topic?.title ?? 'LEARN activity', totalPages: 0, pages: [], status: 'open-original', kind, sourceUrl, reason };
+  }
 }
 
 /** Return page text and images; PowerPoint/Word files first go through LibreOffice. */
@@ -944,3 +1090,4 @@ export async function getUpcoming(courseId: number, daysAhead = 30) {
     }))
     .sort((a, b) => a.start.localeCompare(b.start));
 }
+
